@@ -390,9 +390,345 @@
     await refreshMeters();
     setupSse();
     setInterval(refreshMeters, 450);
+    initBluetooth();
   }
 
   init().catch((err) => {
     qs("#status").textContent = `Initialisierung fehlgeschlagen: ${err.message}`;
   });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // BLUETOOTH-MODAL
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const btState = {
+    adapterAvailable: false,
+    adapterPowered:   false,
+    scanning:         false,
+    scanDuration:     12,
+    scanPollTimer:    null,
+  };
+
+  // Gerätetyp → Emoji
+  function btDeviceEmoji(deviceType, icon) {
+    const t = `${deviceType || ""} ${icon || ""}`.toLowerCase();
+    if (t.includes("headset"))    return "\uD83C\uDFA7";
+    if (t.includes("kopfhörer") || t.includes("headphone")) return "\uD83C\uDFA7";
+    if (t.includes("lautsprecher") || t.includes("speaker")) return "\uD83D\uDD0A";
+    if (t.includes("mikrofon") || t.includes("microphone")) return "\uD83C\uDF99";
+    if (t.includes("audio"))      return "\uD83D\uDD09";
+    if (t.includes("telefon") || t.includes("phone")) return "\uD83D\uDCF1";
+    if (t.includes("tastatur") || t.includes("keyboard")) return "\u2328\uFE0F";
+    if (t.includes("maus")    || t.includes("mouse"))    return "\uD83D\uDDB1";
+    if (t.includes("gamepad") || t.includes("gaming"))   return "\uD83C\uDFAE";
+    if (t.includes("computer"))   return "\uD83D\uDCBB";
+    return "\uD83D\uDCF6";
+  }
+
+  // Signal-Klasse aus RSSI
+  function btSignalClass(rssi) {
+    if (rssi == null) return "";
+    if (rssi >= -60) return "strong";
+    if (rssi >= -70) return "good";
+    if (rssi >= -80) return "fair";
+    return "weak";
+  }
+
+  function btSignalLabel(rssi) {
+    if (rssi == null) return "";
+    const cls  = btSignalClass(rssi);
+    const bars = cls === "strong" ? "\u2582\u2584\u2586\u2588" : cls === "good" ? "\u2582\u2584\u2586\u00B7" : cls === "fair" ? "\u2582\u2584\u00B7\u00B7" : "\u2582\u00B7\u00B7\u00B7";
+    return `${bars} ${rssi} dBm`;
+  }
+
+  function btSetStatus(msg, kind) {
+    const el = qs("#bt-status-line");
+    if (!el) return;
+    el.textContent = msg;
+    el.className   = `bt-status-line${kind ? " " + kind : ""}`;
+  }
+
+  function btRenderAdapter(adapter) {
+    if (!adapter) return;
+    btState.adapterAvailable = adapter.available !== false;
+    btState.adapterPowered   = !!adapter.powered;
+
+    const dot     = qs("#bt-dot-power");
+    const nameEl  = qs("#bt-adapter-name");
+    const macEl   = qs("#bt-adapter-mac");
+    const flags   = qs("#bt-adapter-flags");
+    const pwBtn   = qs("#bt-power-btn");
+    const discBtn = qs("#bt-discoverable-btn");
+
+    if (!adapter.available) {
+      if (dot)    dot.className  = "bt-status-dot off";
+      if (nameEl) nameEl.textContent = adapter.error || "Kein Bluetooth-Adapter gefunden";
+      if (flags)  flags.style.display = "none";
+      if (pwBtn)  { pwBtn.disabled = true; pwBtn.textContent = "Nicht verfügbar"; }
+      if (discBtn) discBtn.disabled = true;
+      return;
+    }
+
+    if (dot)   dot.className  = adapter.powered ? "bt-status-dot on" : "bt-status-dot off";
+    if (nameEl) nameEl.textContent = adapter.powered
+      ? `Adapter aktiv${adapter.name ? ": " + adapter.name : ""}`
+      : "Adapter inaktiv";
+    if (macEl) { macEl.textContent = adapter.mac || ""; macEl.style.display = adapter.mac ? "" : "none"; }
+    if (flags) {
+      flags.style.display = adapter.powered ? "" : "none";
+      const dEl = qs("#bt-flag-discoverable");
+      const pEl = qs("#bt-flag-pairable");
+      if (dEl) { dEl.className = `badge${adapter.discoverable ? " default" : ""}`; dEl.textContent = adapter.discoverable ? "Sichtbar \u2713" : "Unsichtbar"; }
+      if (pEl) { pEl.className = `badge${adapter.pairable ? " state-running" : ""}`; pEl.textContent = adapter.pairable ? "Pairing aktiv \u2713" : "Pairing inaktiv"; }
+    }
+    if (pwBtn)  { pwBtn.disabled = false; pwBtn.textContent = adapter.powered ? "Ausschalten" : "Einschalten"; }
+    if (discBtn) { discBtn.disabled = !adapter.powered; discBtn.textContent = adapter.discoverable ? "Unsichtbar schalten" : "Sichtbar machen"; }
+  }
+
+  function btUpdateScanProgress(scan) {
+    if (!scan) return;
+    const bar     = qs("#bt-scan-bar");
+    const info    = qs("#bt-scan-info");
+    const scanBtn = qs("#bt-scan-btn");
+    const stopBtn = qs("#bt-scan-stop-btn");
+    const timerEl = qs("#bt-scan-timer");
+    const dot     = qs("#bt-dot-power");
+
+    if (scan.scanning) {
+      if (bar)     bar.classList.add("active");
+      if (dot)     dot.className = "bt-status-dot scanning";
+      if (scanBtn)  scanBtn.classList.add("hidden");
+      if (stopBtn)  stopBtn.classList.remove("hidden");
+      if (timerEl) { timerEl.classList.remove("hidden"); timerEl.textContent = `${scan.elapsed_sec}s / ${scan.duration_sec}s`; }
+      if (info)    info.textContent = `Scanne\u2026 ${scan.devices_found} Ger\u00E4t${scan.devices_found !== 1 ? "e" : ""} gefunden`;
+    } else {
+      if (bar)     bar.classList.remove("active");
+      if (dot && btState.adapterPowered) dot.className = "bt-status-dot on";
+      if (scanBtn)  scanBtn.classList.remove("hidden");
+      if (stopBtn)  stopBtn.classList.add("hidden");
+      if (timerEl)  timerEl.classList.add("hidden");
+      if (info)    info.textContent = scan.devices_found > 0
+        ? `Scan abgeschlossen \u2013 ${scan.devices_found} Ger\u00E4t${scan.devices_found !== 1 ? "e" : ""} gefunden`
+        : "Bereit f\u00FCr Scan";
+    }
+  }
+
+  function btDeviceItemHtml(dev, context) {
+    const emoji  = btDeviceEmoji(dev.device_type, dev.icon);
+    const sigCls = btSignalClass(dev.rssi);
+    const sigTxt = btSignalLabel(dev.rssi);
+    const badges = [
+      dev.device_type && dev.device_type !== "Unbekannt" ? `<span class="badge">${escapeHtml(dev.device_type)}</span>` : "",
+      dev.connected  ? `<span class="badge state-running">Verbunden</span>` : "",
+      dev.paired     ? `<span class="badge default">Gepairt</span>` : "",
+      dev.trusted    ? `<span class="badge">Vertraut</span>` : "",
+    ].filter(Boolean).join("");
+
+    let actions = "";
+    const safeMac = escapeHtml(dev.mac);
+    if (context === "found") {
+      if (!dev.paired) {
+        actions += `<button data-btaction="pair" data-mac="${safeMac}" class="primary">Pairen</button>`;
+      } else if (dev.connected) {
+        actions += `<button data-btaction="disconnect" data-mac="${safeMac}">Trennen</button>`;
+      } else {
+        actions += `<button data-btaction="connect" data-mac="${safeMac}" class="primary">Verbinden</button>`;
+      }
+    } else {
+      if (dev.connected) {
+        actions += `<button data-btaction="disconnect" data-mac="${safeMac}">Trennen</button>`;
+      } else {
+        actions += `<button data-btaction="connect" data-mac="${safeMac}" class="primary">Verbinden</button>`;
+      }
+      actions += `<button data-btaction="remove" data-mac="${safeMac}">Entfernen</button>`;
+    }
+
+    return `
+      <div class="bt-device-item${dev.connected ? " connected" : ""}">
+        <div class="bt-device-icon">${emoji}</div>
+        <div class="bt-device-info">
+          <div class="bt-device-name">${escapeHtml(dev.name || dev.mac)}</div>
+          <div class="bt-device-mac">${safeMac}</div>
+          <div class="bt-device-badges">${badges}</div>
+        </div>
+        ${sigTxt ? `<div class="bt-signal ${sigCls}">${sigTxt}</div>` : ""}
+        <div class="bt-device-actions">${actions}</div>
+      </div>`;
+  }
+
+  function btRenderFoundDevices(devices) {
+    const list = qs("#bt-found-list");
+    if (!list) return;
+    if (!devices || !devices.length) { list.innerHTML = `<div class="bt-empty">Keine Ger\u00E4te in Reichweite gefunden.</div>`; return; }
+    list.innerHTML = devices.map((d) => btDeviceItemHtml(d, "found")).join("");
+  }
+
+  function btRenderKnownDevices(devices) {
+    const list = qs("#bt-known-list");
+    if (!list) return;
+    if (!devices || !devices.length) { list.innerHTML = `<div class="bt-empty">Keine bekannten Ger\u00E4te.</div>`; return; }
+    list.innerHTML = devices.map((d) => btDeviceItemHtml(d, "known")).join("");
+  }
+
+  async function btLoadStatus() {
+    try {
+      const data = await getJson("/api/bluetooth/status");
+      btRenderAdapter(data.adapter);
+      btUpdateScanProgress(data.scan);
+      if (data.scan && data.scan.devices_found > 0) btRenderFoundDevices(data.scan.devices);
+      btState.scanning = !!(data.scan && data.scan.scanning);
+      if (btState.scanning) btStartScanPolling();
+    } catch (err) {
+      btSetStatus(`Adapter-Status Fehler: ${err.message}`, "error");
+    }
+  }
+
+  async function btLoadKnown() {
+    try {
+      const data = await getJson("/api/bluetooth/devices");
+      btRenderKnownDevices(data.devices || []);
+    } catch (err) {
+      const list = qs("#bt-known-list");
+      if (list) list.innerHTML = `<div class="bt-empty">Fehler: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  async function btPollScan() {
+    try {
+      const data = await getJson("/api/bluetooth/scan/results");
+      btUpdateScanProgress(data);
+      btRenderFoundDevices(data.devices || []);
+      btState.scanning = data.scanning;
+      if (!data.scanning) {
+        btStopScanPolling();
+        await btLoadKnown();
+        await refreshSummaryAndTables();
+      }
+    } catch (err) {
+      btSetStatus(`Scan-Fehler: ${err.message}`, "error");
+      btStopScanPolling();
+    }
+  }
+
+  function btStartScanPolling() {
+    if (btState.scanPollTimer) return;
+    btState.scanPollTimer = setInterval(btPollScan, 2000);
+  }
+
+  function btStopScanPolling() {
+    if (btState.scanPollTimer) { clearInterval(btState.scanPollTimer); btState.scanPollTimer = null; }
+  }
+
+  async function btHandleAction(action, mac) {
+    btSetStatus(`${action}: ${mac}\u2026`);
+    const urlMac = encodeURIComponent(mac);
+    const cfg = {
+      pair:       { url: `/api/bluetooth/device/${urlMac}/pair`,       method: "POST" },
+      connect:    { url: `/api/bluetooth/device/${urlMac}/connect`,    method: "POST" },
+      disconnect: { url: `/api/bluetooth/device/${urlMac}/disconnect`, method: "POST" },
+      remove:     { url: `/api/bluetooth/device/${urlMac}`,            method: "DELETE" },
+    }[action];
+    if (!cfg) return;
+
+    const btn = document.querySelector(`[data-btaction="${action}"][data-mac="${mac}"]`);
+    if (btn) { btn.disabled = true; btn.textContent = "\u2026"; }
+
+    try {
+      const res  = await fetch(cfg.url, { method: cfg.method, headers: { Accept: "application/json", "Content-Type": "application/json" }, body: cfg.method !== "DELETE" ? JSON.stringify({}) : undefined });
+      const data = await res.json().catch(() => ({}));
+      if (!data.ok && res.status !== 200) {
+        btSetStatus(`Fehler: ${data.error || data.message || "Unbekannt"}`, "error");
+        if (btn) { btn.disabled = false; btn.textContent = action; }
+      } else {
+        const labels = { pair: "Gepairt", connect: "Verbunden", disconnect: "Getrennt", remove: "Entfernt" };
+        btSetStatus(`${labels[action] || "OK"}: ${mac}`, "ok");
+        await btLoadKnown();
+        const scanData = await getJson("/api/bluetooth/scan/results");
+        btRenderFoundDevices(scanData.devices || []);
+        if (action === "pair" || action === "connect" || action === "disconnect") {
+          setTimeout(async () => { await refreshSummaryAndTables(); }, 2000);
+        }
+      }
+    } catch (err) {
+      btSetStatus(`Netzwerkfehler: ${err.message}`, "error");
+      if (btn) { btn.disabled = false; btn.textContent = action; }
+    }
+  }
+
+  async function btOpenModal() {
+    const modal = qs("#bt-modal");
+    if (!modal) return;
+    modal.classList.remove("hidden");
+    document.body.style.overflow = "hidden";
+    await btLoadStatus();
+    await btLoadKnown();
+  }
+
+  function btCloseModal() {
+    const modal = qs("#bt-modal");
+    if (!modal) return;
+    modal.classList.add("hidden");
+    document.body.style.overflow = "";
+    btStopScanPolling();
+  }
+
+  function initBluetooth() {
+    qs("#bt-open-btn")?.addEventListener("click", btOpenModal);
+    qs("#bt-modal-close")?.addEventListener("click", btCloseModal);
+    qs("#bt-modal")?.addEventListener("click", (ev) => { if (ev.target === qs("#bt-modal")) btCloseModal(); });
+    document.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && !qs("#bt-modal")?.classList.contains("hidden")) btCloseModal(); });
+
+    qs("#bt-power-btn")?.addEventListener("click", async () => {
+      const on = qs("#bt-power-btn")?.textContent?.includes("Einschalten");
+      try {
+        const res  = await fetch("/api/bluetooth/adapter/power", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ on }) });
+        const data = await res.json().catch(() => ({}));
+        btSetStatus(data.ok ? (on ? "Adapter eingeschaltet" : "Adapter ausgeschaltet") : `Fehler: ${data.message}`, data.ok ? "ok" : "error");
+        await btLoadStatus();
+      } catch (err) { btSetStatus(`Fehler: ${err.message}`, "error"); }
+    });
+
+    qs("#bt-discoverable-btn")?.addEventListener("click", async () => {
+      const on = qs("#bt-discoverable-btn")?.textContent?.includes("Sichtbar machen");
+      try {
+        const res  = await fetch("/api/bluetooth/adapter/discoverable", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ on }) });
+        const data = await res.json().catch(() => ({}));
+        btSetStatus(data.ok ? (on ? "Adapter sichtbar" : "Adapter unsichtbar") : `Fehler: ${data.message}`, data.ok ? "ok" : "error");
+        await btLoadStatus();
+      } catch (err) { btSetStatus(`Fehler: ${err.message}`, "error"); }
+    });
+
+    qs("#bt-scan-btn")?.addEventListener("click", async () => {
+      try {
+        const res  = await fetch("/api/bluetooth/scan/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ duration_sec: btState.scanDuration }) });
+        const data = await res.json().catch(() => ({}));
+        if (data.ok) {
+          btState.scanning = true;
+          btSetStatus("Scan l\u00E4uft\u2026");
+          await btPollScan();
+          btStartScanPolling();
+        } else {
+          btSetStatus(`Scan-Fehler: ${data.error || data.message}`, "error");
+        }
+      } catch (err) { btSetStatus(`Fehler: ${err.message}`, "error"); }
+    });
+
+    qs("#bt-scan-stop-btn")?.addEventListener("click", async () => {
+      try {
+        await fetch("/api/bluetooth/scan/stop", { method: "POST" });
+        btStopScanPolling();
+        btState.scanning = false;
+        btUpdateScanProgress({ scanning: false, devices_found: 0, elapsed_sec: 0, duration_sec: btState.scanDuration });
+        btSetStatus("Scan gestoppt");
+        await btLoadKnown();
+      } catch (err) { btSetStatus(`Fehler: ${err.message}`, "error"); }
+    });
+
+    qs("#bt-modal")?.addEventListener("click", (ev) => {
+      const btn = ev.target.closest("[data-btaction]");
+      if (!btn) return;
+      ev.stopPropagation();
+      btHandleAction(btn.getAttribute("data-btaction"), btn.getAttribute("data-mac"));
+    });
+  }
 })();

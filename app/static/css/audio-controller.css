@@ -155,3 +155,233 @@ pre {
   .topbar { flex-direction: column; align-items: flex-start; }
   .range { width: 100%; }
 }
+
+/* ── Bluetooth-Modal ─────────────────────────────────────────────────────── */
+.bt-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 35, 60, 0.45);
+  backdrop-filter: blur(2px);
+  z-index: 100;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 2rem 1rem;
+  overflow-y: auto;
+}
+.bt-modal-dialog {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  width: 100%;
+  max-width: 680px;
+  box-shadow: 0 8px 40px rgba(15, 106, 201, 0.15);
+  position: relative;
+}
+.bt-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem 1.2rem 0.8rem;
+  border-bottom: 1px solid var(--line);
+}
+.bt-modal-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.bt-modal-close {
+  background: none;
+  border: none;
+  font-size: 1.2rem;
+  cursor: pointer;
+  color: var(--muted);
+  padding: 0.25rem 0.5rem;
+  border-radius: 8px;
+  line-height: 1;
+}
+.bt-modal-close:hover { background: var(--bg); color: var(--text); }
+.bt-modal-body { padding: 1rem 1.2rem 1.4rem; }
+
+/* Adapter-Status-Panel */
+.bt-adapter-panel {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.8rem 1rem;
+  margin-bottom: 1rem;
+}
+.bt-adapter-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  font-size: 0.9rem;
+}
+.bt-adapter-row + .bt-adapter-row { margin-top: 0.4rem; }
+.bt-status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.bt-status-dot.on  { background: var(--ok); }
+.bt-status-dot.off { background: var(--muted); }
+.bt-status-dot.scanning {
+  background: var(--accent);
+  animation: bt-pulse 1s ease-in-out infinite;
+}
+.bt-adapter-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.6rem;
+}
+
+/* Scan-Bereich */
+.bt-scan-section {
+  margin-bottom: 1.1rem;
+}
+.bt-scan-controls {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 0.6rem;
+}
+.bt-scan-track {
+  height: 8px;
+  background: #e6edf8;
+  border-radius: 999px;
+  overflow: hidden;
+  margin-bottom: 0.35rem;
+}
+.bt-scan-bar {
+  height: 100%;
+  border-radius: 999px;
+  width: 0%;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  background-size: 200% 100%;
+  transition: width 0.3s ease;
+}
+.bt-scan-bar.active {
+  animation: bt-scan-sweep 1.8s ease-in-out infinite;
+  width: 100%;
+}
+@keyframes bt-scan-sweep {
+  0%   { background-position: -100% 0; opacity: 0.9; }
+  50%  { background-position: 100% 0; opacity: 1; }
+  100% { background-position: -100% 0; opacity: 0.9; }
+}
+@keyframes bt-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.4; }
+}
+.bt-scan-info {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+/* Gerätliste */
+.bt-section-title {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 1rem 0 0.5rem;
+}
+.bt-device-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.bt-device-item {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.65rem 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+.bt-device-item.connected {
+  border-color: #95d8a8;
+  background: #f0fbf3;
+}
+.bt-device-icon {
+  font-size: 1.4rem;
+  flex-shrink: 0;
+  width: 2rem;
+  text-align: center;
+}
+.bt-device-info {
+  flex: 1;
+  min-width: 120px;
+}
+.bt-device-name {
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+.bt-device-mac {
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
+}
+.bt-device-badges {
+  display: flex;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+  margin-top: 0.25rem;
+}
+.bt-device-actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+.bt-device-actions button {
+  font-size: 0.8rem;
+  padding: 0.3rem 0.55rem;
+}
+.bt-signal {
+  font-size: 0.78rem;
+  color: var(--muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.bt-signal.strong { color: var(--ok); }
+.bt-signal.good   { color: #3a9a5c; }
+.bt-signal.fair   { color: var(--warn); }
+.bt-signal.weak   { color: var(--bad); }
+
+.bt-empty {
+  color: var(--muted);
+  font-size: 0.88rem;
+  padding: 0.5rem 0;
+  text-align: center;
+}
+.bt-status-line {
+  font-size: 0.84rem;
+  color: var(--muted);
+  margin-top: 0.6rem;
+  min-height: 1.1em;
+}
+.bt-status-line.error { color: var(--bad); }
+.bt-status-line.ok    { color: var(--ok); }
+
+/* Bluetooth-Button im Topbar */
+button.bt-open-btn {
+  background: var(--panel);
+  border-color: #9cc5ef;
+  color: #0e63bd;
+}
+button.bt-open-btn:hover { background: #eaf4ff; }
+
+@media (max-width: 600px) {
+  .bt-modal-dialog { border-radius: 12px; }
+  .bt-device-item  { gap: 0.5rem; }
+}

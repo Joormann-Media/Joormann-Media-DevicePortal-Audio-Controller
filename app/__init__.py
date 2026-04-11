@@ -3,11 +3,13 @@ from __future__ import annotations
 from flask import Flask, redirect, url_for
 
 from app.routes.audio import audio_bp
+from app.routes.bluetooth import bluetooth_bp
 
 
 def create_app() -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     app.register_blueprint(audio_bp)
+    app.register_blueprint(bluetooth_bp)
 
     @app.get("/")
     def root_redirect():

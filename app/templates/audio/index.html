@@ -15,6 +15,7 @@
         </div>
         <div class="controls">
           <button id="refresh-btn" class="primary">Aktualisieren</button>
+          <button id="bt-open-btn" class="bt-open-btn">&#x1F4F6; Bluetooth</button>
           <button id="expert-toggle">{% if expert_mode %}Expertenmodus aus{% else %}Expertenmodus an{% endif %}</button>
           <span id="status">Bereit</span>
         </div>
@@ -85,6 +86,62 @@
         </section>
       {% endif %}
     </main>
+
+    <!-- ── Bluetooth-Modal ──────────────────────────────────────────────── -->
+    <div id="bt-modal" class="bt-modal-backdrop hidden" role="dialog" aria-modal="true" aria-label="Bluetooth-Verwaltung">
+      <div class="bt-modal-dialog">
+        <div class="bt-modal-header">
+          <h2>&#x1F4F6; Bluetooth-Geräteverwaltung</h2>
+          <button class="bt-modal-close" id="bt-modal-close" title="Schließen">&#x2715;</button>
+        </div>
+        <div class="bt-modal-body">
+
+          <!-- Adapter-Status -->
+          <div class="bt-adapter-panel" id="bt-adapter-panel">
+            <div class="bt-adapter-row">
+              <span class="bt-status-dot off" id="bt-dot-power"></span>
+              <span id="bt-adapter-name">Lade Adapter…</span>
+              <span class="meta-inline" id="bt-adapter-mac"></span>
+            </div>
+            <div class="bt-adapter-row" id="bt-adapter-flags" style="display:none">
+              <span class="badge" id="bt-flag-discoverable">Sichtbar</span>
+              <span class="badge" id="bt-flag-pairable">Pairing</span>
+            </div>
+            <div class="bt-adapter-actions">
+              <button id="bt-power-btn" class="primary">Einschalten</button>
+              <button id="bt-discoverable-btn">Sichtbar machen</button>
+            </div>
+          </div>
+
+          <!-- Scanner -->
+          <div class="bt-scan-section">
+            <div class="bt-scan-controls">
+              <button id="bt-scan-btn" class="primary">Scan starten</button>
+              <button id="bt-scan-stop-btn" class="hidden">Scan stoppen</button>
+              <span id="bt-scan-timer" class="meta-inline hidden">0s</span>
+            </div>
+            <div class="bt-scan-track">
+              <div class="bt-scan-bar" id="bt-scan-bar"></div>
+            </div>
+            <div class="bt-scan-info" id="bt-scan-info">Bereit für Scan</div>
+          </div>
+
+          <!-- Gefundene Geräte (Scan-Ergebnisse) -->
+          <div class="bt-section-title">Gefundene Geräte</div>
+          <div class="bt-device-list" id="bt-found-list">
+            <div class="bt-empty">Noch kein Scan durchgeführt.</div>
+          </div>
+
+          <!-- Bekannte / Gepaarte Geräte -->
+          <div class="bt-section-title">Bekannte &amp; Verbundene Geräte</div>
+          <div class="bt-device-list" id="bt-known-list">
+            <div class="bt-empty">Lädt…</div>
+          </div>
+
+          <div class="bt-status-line" id="bt-status-line"></div>
+        </div>
+      </div>
+    </div>
 
     <script>
       window.AUDIO_BOOTSTRAP = {
