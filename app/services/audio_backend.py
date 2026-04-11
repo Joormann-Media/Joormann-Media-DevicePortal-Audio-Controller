@@ -37,10 +37,14 @@ class AudioBackend:
         parsed = {
             "pactl_short_sinks": self._parse_pactl_short(results["pactl_short_sinks"].output),
             "pactl_short_sources": self._parse_pactl_short(results["pactl_short_sources"].output),
-            "pactl_sinks": self._parse_pactl_blocks(results["pactl_sinks"].output, "Sink"),
-            "pactl_sources": self._parse_pactl_blocks(results["pactl_sources"].output, "Source"),
-            "pactl_sink_inputs": self._parse_pactl_blocks(results["pactl_sink_inputs"].output, "Sink Input"),
-            "pactl_source_outputs": self._parse_pactl_blocks(results["pactl_source_outputs"].output, "Source Output"),
+            "pactl_sinks": self._parse_pactl_blocks(results["pactl_sinks"].output, ["Sink", "Senke"]),
+            "pactl_sources": self._parse_pactl_blocks(results["pactl_sources"].output, ["Source", "Quelle"]),
+            "pactl_sink_inputs": self._parse_pactl_blocks(
+                results["pactl_sink_inputs"].output, ["Sink Input", "Wiedergabe-Stream"]
+            ),
+            "pactl_source_outputs": self._parse_pactl_blocks(
+                results["pactl_source_outputs"].output, ["Source Output", "Aufnahme-Stream"]
+            ),
             "alsa_playback_hw": self._parse_alsa_hw(results["aplay_l"].output),
             "alsa_capture_hw": self._parse_alsa_hw(results["arecord_l"].output),
             "wpctl_nodes": self._parse_wpctl_nodes(results["wpctl_status"].output),
@@ -89,12 +93,13 @@ class AudioBackend:
             )
         return out
 
-    def _parse_pactl_blocks(self, text: str, block_label: str) -> List[Dict[str, Any]]:
+    def _parse_pactl_blocks(self, text: str, block_labels: List[str]) -> List[Dict[str, Any]]:
         blocks: List[Dict[str, Any]] = []
         current: Dict[str, Any] | None = None
         section = ""
 
-        block_re = re.compile(rf"^\s*{re.escape(block_label)}\s+#(\d+)\s*$")
+        labels = "|".join(re.escape(lbl) for lbl in block_labels)
+        block_re = re.compile(rf"^\s*(?:{labels})\s+#(\d+)\s*$", re.IGNORECASE)
         key_value_re = re.compile(r"^\s*([^:]+):\s*(.*)$")
         prop_re = re.compile(r'^\s*([^=]+)=\s*"?(.*?)"?\s*$')
         port_re = re.compile(r"^\s*([^:]+):\s*(.+)$")

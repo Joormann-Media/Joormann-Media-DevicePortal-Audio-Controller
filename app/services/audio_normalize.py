@@ -138,8 +138,46 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
     parsed = raw["parsed"]
     defaults = raw["defaults"]
 
-    sink_by_name = {s.get("name", ""): s for s in parsed["pactl_sinks"] if s.get("name")}
-    source_by_name = {s.get("name", ""): s for s in parsed["pactl_sources"] if s.get("name")}
+    pactl_sinks = parsed["pactl_sinks"][:]
+    pactl_sources = parsed["pactl_sources"][:]
+
+    # Locale-/format-robuster Fallback: Wenn "pactl list sinks/sources" nicht parsebar ist,
+    # nutzen wir "pactl list short ..." für eine minimale, aber brauchbare Geräteliste.
+    if not pactl_sinks and parsed["pactl_short_sinks"]:
+        for row in parsed["pactl_short_sinks"]:
+            pactl_sinks.append(
+                {
+                    "index": row.get("index", ""),
+                    "name": row.get("name", ""),
+                    "description": row.get("name", ""),
+                    "state": row.get("state", ""),
+                    "mute": "no",
+                    "volume": "",
+                    "sample_spec": row.get("sample_spec", ""),
+                    "channel_map": "",
+                    "monitor_source": f"{row.get('name', '')}.monitor",
+                    "properties": {},
+                    "ports": {},
+                }
+            )
+    if not pactl_sources and parsed["pactl_short_sources"]:
+        for row in parsed["pactl_short_sources"]:
+            name = row.get("name", "")
+            pactl_sources.append(
+                {
+                    "index": row.get("index", ""),
+                    "name": name,
+                    "description": name,
+                    "state": row.get("state", ""),
+                    "mute": "no",
+                    "volume": "",
+                    "sample_spec": row.get("sample_spec", ""),
+                    "channel_map": "",
+                    "monitor_of_sink": "yes" if name.endswith(".monitor") else "",
+                    "properties": {},
+                    "ports": {},
+                }
+            )
 
     wpctl_name_to_id = {row["name"]: row["wpctl_id"] for row in parsed["wpctl_nodes"]}
 
@@ -149,7 +187,7 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
     virtual_devices: List[AudioDevice] = []
     hidden_diagnostic_only: List[AudioDevice] = []
 
-    for sink in parsed["pactl_sinks"]:
+    for sink in pactl_sinks:
         tech_name = sink.get("name", "")
         props = sink.get("properties", {})
         desc = sink.get("description", props.get("device.description", ""))
@@ -194,7 +232,7 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
         else:
             output_devices.append(device)
 
-    for source in parsed["pactl_sources"]:
+    for source in pactl_sources:
         tech_name = source.get("name", "")
         props = source.get("properties", {})
         desc = source.get("description", props.get("device.description", ""))
