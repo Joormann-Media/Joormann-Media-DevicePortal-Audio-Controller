@@ -90,5 +90,8 @@
     <div class="meta">card: {{ device.card_name or '-' }} card_index={{ device.card_index if device.card_index is not none else '-' }} device_index={{ device.device_index if device.device_index is not none else '-' }}</div>
     <div class="meta">ports: {{ device.ports | join(', ') if device.ports else '-' }}</div>
     <div class="meta">kanale: {{ device.channel_volumes | tojson }}</div>
+    {% if device.device_class == 'input_device' %}
+      <div class="meta">alsa_controls: {{ device.alsa_controls | map(attribute='name') | join(', ') if device.alsa_controls else '-' }}</div>
+    {% endif %}
   </details>
 </article>

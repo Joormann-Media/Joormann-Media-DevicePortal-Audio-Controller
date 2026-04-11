@@ -38,6 +38,8 @@ class AudioBackend:
 
         pactl_short_sinks = self._parse_pactl_short(results["pactl_short_sinks"].output)
         pactl_short_sources = self._parse_pactl_short(results["pactl_short_sources"].output)
+        pactl_sinks = self._parse_pactl_blocks(results["pactl_sinks"].output, ["Sink", "Senke"])
+        pactl_sources = self._parse_pactl_blocks(results["pactl_sources"].output, ["Source", "Quelle"])
 
         # Per-device explicit get-volume/get-mute as primary truth fallback
         sink_probe: Dict[str, Dict[str, str]] = {}
@@ -60,7 +62,11 @@ class AudioBackend:
 
         alsa_playback_hw = self._parse_alsa_hw(results["aplay_l"].output)
         alsa_capture_hw = self._parse_alsa_hw(results["arecord_l"].output)
-        card_indexes = sorted({row["card_index"] for row in [*alsa_playback_hw, *alsa_capture_hw]})
+        card_indexes = {
+            row["card_index"] for row in [*alsa_playback_hw, *alsa_capture_hw]
+        }
+        card_indexes |= self._extract_card_indexes_from_pactl([*pactl_sinks, *pactl_sources])
+        card_indexes = sorted(card_indexes)
 
         amixer_per_card: Dict[str, Dict[str, Any]] = {}
         for card_idx in card_indexes:
@@ -87,8 +93,8 @@ class AudioBackend:
         parsed = {
             "pactl_short_sinks": pactl_short_sinks,
             "pactl_short_sources": pactl_short_sources,
-            "pactl_sinks": self._parse_pactl_blocks(results["pactl_sinks"].output, ["Sink", "Senke"]),
-            "pactl_sources": self._parse_pactl_blocks(results["pactl_sources"].output, ["Source", "Quelle"]),
+            "pactl_sinks": pactl_sinks,
+            "pactl_sources": pactl_sources,
             "pactl_sink_inputs": self._parse_pactl_blocks(
                 results["pactl_sink_inputs"].output, ["Sink Input", "Wiedergabe-Stream"]
             ),
@@ -126,6 +132,16 @@ class AudioBackend:
                 for name, result in results.items()
             },
         }
+
+    def _extract_card_indexes_from_pactl(self, blocks: List[Dict[str, Any]]) -> set[int]:
+        indexes: set[int] = set()
+        for block in blocks:
+            props = block.get("properties", {}) or {}
+            for key in ["alsa.card", "alsa.card_index", "device.card"]:
+                raw = str(props.get(key, "")).strip()
+                if raw.isdigit():
+                    indexes.add(int(raw))
+        return indexes
 
     def _parse_pactl_short(self, text: str) -> List[Dict[str, str]]:
         out: List[Dict[str, str]] = []
@@ -358,13 +374,13 @@ class AudioBackend:
             if not line:
                 continue
 
-            if line.lower().startswith("capabilities:"):
+            if line.lower().startswith("capabilities:") or line.lower().startswith("fähigkeiten:"):
                 capabilities = [t.strip().lower() for t in line.split(":", 1)[1].split() if t.strip()]
                 continue
-            if line.lower().startswith("capture channels:"):
+            if line.lower().startswith("capture channels:") or line.lower().startswith("aufnahmekanäle:"):
                 channel_mode = line.split(":", 1)[1].strip()
                 continue
-            if line.lower().startswith("playback channels:") and not channel_mode:
+            if (line.lower().startswith("playback channels:") or line.lower().startswith("wiedergabekanäle:")) and not channel_mode:
                 channel_mode = line.split(":", 1)[1].strip()
                 continue
 

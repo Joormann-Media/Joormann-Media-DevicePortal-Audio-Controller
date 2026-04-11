@@ -147,9 +147,9 @@ class AudioControlService:
         pct_re = re.compile(r"\[(\d+)%\]")
         db_re = re.compile(r"\[(-?\d+(?:\.\d+)?)dB\]")
         raw_re = re.compile(r"\bCapture\s+(-?\d+)\b", re.IGNORECASE)
-        limits_re = re.compile(r"^\s*Limits:\s*(?:Capture|Playback)?\s*(-?\d+)\s*-\s*(-?\d+)\s*$", re.IGNORECASE)
-        cap_re = re.compile(r"^\s*Capabilities:\s*(.+)$", re.IGNORECASE)
-        channel_re = re.compile(r"^\s*(Capture channels|Playback channels):\s*(.+)$", re.IGNORECASE)
+        limits_re = re.compile(r"^\s*(?:Limits|Grenzen):\s*(?:Capture|Playback)?\s*(-?\d+)\s*-\s*(-?\d+)\s*$", re.IGNORECASE)
+        cap_re = re.compile(r"^\s*(?:Capabilities|Fähigkeiten):\s*(.+)$", re.IGNORECASE)
+        channel_re = re.compile(r"^\s*(Capture channels|Playback channels|Aufnahmekanäle|Wiedergabekanäle):\s*(.+)$", re.IGNORECASE)
 
         caps: list[str] = []
         mode = ""

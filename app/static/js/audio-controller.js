@@ -160,6 +160,7 @@
           <div class="meta">card: ${escapeHtml(d.card_name || "-")} card_index=${d.card_index ?? "-"} device_index=${d.device_index ?? "-"}</div>
           <div class="meta">ports: ${escapeHtml((d.ports || []).join(", ") || "-")}</div>
           <div class="meta">kanale: ${escapeHtml(JSON.stringify(d.channel_volumes || []))}</div>
+          ${kind === "input" ? `<div class="meta">alsa_controls: ${escapeHtml(((d.alsa_controls || []).map((x) => x.name)).join(", ") || "-")}</div>` : ""}
         </details>
       </article>
     `;

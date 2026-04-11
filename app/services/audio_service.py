@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import platform
+import time
 from threading import Lock
 from typing import Any, Dict
 
@@ -21,9 +22,16 @@ class AudioService:
         self.meter = AudioMeterService()
         self.recorder = AudioRecorderService()
         self._lock = Lock()
+        self._snapshot_cache: Dict[str, Any] | None = None
+        self._snapshot_cache_ts: float = 0.0
+        self._snapshot_cache_ttl_sec: float = 1.5
 
     def build_snapshot(self, include_diagnostics: bool = False) -> Dict[str, Any]:
         with self._lock:
+            now = time.monotonic()
+            if not include_diagnostics and self._snapshot_cache is not None and (now - self._snapshot_cache_ts) <= self._snapshot_cache_ttl_sec:
+                return self._snapshot_cache
+
             raw = self.backend.collect_raw()
             normalized = normalize_audio(raw)
             summary = self._build_summary(raw, normalized)
@@ -44,6 +52,9 @@ class AudioService:
             if include_diagnostics:
                 base["diagnostics"] = build_diagnostics(raw, normalized)
                 base["hidden_diagnostic_only"] = normalized["hidden_diagnostic_only"]
+            else:
+                self._snapshot_cache = base
+                self._snapshot_cache_ts = now
             return base
 
     def _build_summary(self, raw: Dict[str, Any], normalized: Dict[str, Any]) -> Dict[str, Any]:
