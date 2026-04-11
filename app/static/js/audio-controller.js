@@ -14,10 +14,6 @@
     return document.querySelector(sel);
   }
 
-  function qsa(sel) {
-    return Array.from(document.querySelectorAll(sel));
-  }
-
   function meterBar(id, value) {
     const bar = qs(`[data-meter="${id}"]`);
     const text = qs(`[data-meter-text="${id}"]`);
@@ -67,29 +63,60 @@
     }
   }
 
+  function volumeForDevice(d, kind) {
+    if (kind === "output") return Number.isInteger(d.volume_percent_current) ? d.volume_percent_current : 0;
+    return Number.isInteger(d.source_volume_percent_current) ? d.source_volume_percent_current : 0;
+  }
+
+  function renderInputExtras(d) {
+    const hwGain = d.has_capture_gain
+      ? `<label>Hardware Gain:</label>
+         <input class="range" type="range" min="0" max="100" step="1" value="${Number.isInteger(d.capture_gain_percent) ? d.capture_gain_percent : 0}" data-action="set-capture-gain" data-id="${d.stable_id}" />
+         <span>${Number.isInteger(d.capture_gain_percent) ? d.capture_gain_percent : 0}%</span>`
+      : "<span>Hardware Gain: nicht verfugbar</span>";
+
+    const micBoost = d.mic_boost_available
+      ? `<label>Mic Boost:</label>
+         <input class="range" type="range" min="0" max="100" step="1" value="${Number.isInteger(d.mic_boost_percent) ? d.mic_boost_percent : 0}" data-action="set-mic-boost" data-id="${d.stable_id}" />
+         <span>${Number.isInteger(d.mic_boost_percent) ? d.mic_boost_percent : 0}%</span>`
+      : "<span>Mic Boost: nicht verfugbar</span>";
+
+    return `
+      <div class="actions">${hwGain}</div>
+      <div class="actions">${micBoost}<button data-action="test-record" data-id="${d.stable_id}">Testaufnahme</button></div>
+      <div class="meta" data-test-result="${d.stable_id}">Letzte Testaufnahme: -</div>
+      <audio controls class="hidden" data-audio-player="${d.stable_id}"></audio>
+    `;
+  }
+
   function deviceCardHtml(kind, d) {
     const isDefault = d.default ? "<span class='badge default'>Default</span>" : "";
     const stateBadge = `<span class='badge state-${d.state}'>${d.state}</span>`;
+    const vol = volumeForDevice(d, kind);
     const muteLabel = d.muted ? "Unmute" : "Mute";
-    const vol = Number.isInteger(d.volume_percent) ? d.volume_percent : 0;
+    const setMuteAction = kind === "output" ? "set-output-mute" : "set-input-mute";
+    const setVolAction = kind === "output" ? "set-output-volume" : "set-input-volume";
+    const volumeLabel = kind === "output" ? "Output-Lautstarke" : "Mikrofon-Lautstarke";
+    const currentDb = kind === "output" ? d.volume_db_current : d.source_volume_db_current;
+
     return `
       <article class="card" data-device="${d.stable_id}">
         <div class="card-head">
           <div class="dev-name">${escapeHtml(d.display_name)}</div>
-          <div class="badges">
-            ${isDefault}
-            <span class="badge">${escapeHtml(d.bus_type)}</span>
-            ${stateBadge}
-          </div>
+          <div class="badges">${isDefault}<span class="badge">${escapeHtml(d.bus_type)}</span>${stateBadge}</div>
         </div>
         <div class="meta">${escapeHtml(d.description || d.technical_name)}</div>
-        <div class="meta">Anschluss: ${escapeHtml(d.connection_label || "-")} | Profil: ${escapeHtml(d.profile || "-")}</div>
+        <div class="meta">Anschluss: ${escapeHtml(d.connection_label || "-")} | Port: ${escapeHtml(d.active_port || "-")} | Profil: ${escapeHtml(d.profile || "-")}</div>
+        <div class="meta">Basislautstarke: ${Number.isInteger(d.base_volume_percent) ? d.base_volume_percent : "-"}% ${d.base_volume_db !== null && d.base_volume_db !== undefined ? `/ ${escapeHtml(String(d.base_volume_db))} dB` : ""}</div>
         <div class="actions">
           <button data-action="set-default" data-id="${d.stable_id}">Als Default</button>
-          <button data-action="toggle-mute" data-id="${d.stable_id}" data-mute="${d.muted ? "0" : "1"}">${muteLabel}</button>
-          <input class="range" type="range" min="0" max="150" step="1" value="${vol}" data-action="set-volume" data-id="${d.stable_id}" />
+          <button data-action="${setMuteAction}" data-id="${d.stable_id}" data-mute="${d.muted ? "0" : "1"}">${muteLabel}</button>
+          <label>${volumeLabel}:</label>
+          <input class="range" type="range" min="0" max="150" step="1" value="${vol}" data-action="${setVolAction}" data-id="${d.stable_id}" />
           <span>${vol}%</span>
         </div>
+        <div class="meta">Aktuell: ${vol}% ${currentDb !== null && currentDb !== undefined ? `/ ${escapeHtml(String(currentDb))} dB` : ""}</div>
+        ${kind === "input" ? renderInputExtras(d) : ""}
         <div class="meter"><div class="meter-bar" data-meter="${d.stable_id}"></div></div>
         <div class="meter-text" data-meter-text="${d.stable_id}">Pegel wird geladen...</div>
         <details class="details">
@@ -97,6 +124,7 @@
           <div class="meta">technical_name: ${escapeHtml(d.technical_name)}</div>
           <div class="meta">card: ${escapeHtml(d.card_name || "-")} card_index=${d.card_index ?? "-"} device_index=${d.device_index ?? "-"}</div>
           <div class="meta">ports: ${escapeHtml((d.ports || []).join(", ") || "-")}</div>
+          <div class="meta">kanale: ${escapeHtml(JSON.stringify(d.channel_volumes || []))}</div>
         </details>
       </article>
     `;
@@ -119,9 +147,10 @@
       tbody.innerHTML = "<tr><td colspan='6'>Keine aktiven Streams erkannt.</td></tr>";
       return;
     }
-    tbody.innerHTML = streams.map((s) => {
-      const vol = Number.isInteger(s.volume_percent) ? s.volume_percent : 0;
-      return `
+    tbody.innerHTML = streams
+      .map((s) => {
+        const vol = Number.isInteger(s.volume_percent) ? s.volume_percent : 0;
+        return `
         <tr>
           <td>${escapeHtml(s.app_name)}</td>
           <td>${escapeHtml(s.process_name || "-")}</td>
@@ -133,7 +162,8 @@
           <td>${s.muted ? "muted" : "active"}</td>
           <td>${escapeHtml(s.stream_id)}</td>
         </tr>`;
-    }).join("");
+      })
+      .join("");
   }
 
   function escapeHtml(v) {
@@ -154,6 +184,7 @@
     if (!res.ok || !data.ok) {
       throw new Error(data.error || `HTTP ${res.status}`);
     }
+    return data;
   }
 
   async function handleAction(ev) {
@@ -164,18 +195,46 @@
     try {
       if (action === "set-default") {
         await postJson(`/api/audio/device/${target.getAttribute("data-id")}/set-default`, {});
-      } else if (action === "toggle-mute") {
-        await postJson(`/api/audio/device/${target.getAttribute("data-id")}/set-mute`, {
+      } else if (action === "set-output-mute") {
+        await postJson(`/api/audio/device/${target.getAttribute("data-id")}/set-output-mute`, {
           mute: target.getAttribute("data-mute") === "1",
         });
-      } else if (action === "set-volume") {
-        await postJson(`/api/audio/device/${target.getAttribute("data-id")}/set-volume`, {
+      } else if (action === "set-input-mute") {
+        await postJson(`/api/audio/device/${target.getAttribute("data-id")}/set-input-mute`, {
+          mute: target.getAttribute("data-mute") === "1",
+        });
+      } else if (action === "set-output-volume") {
+        await postJson(`/api/audio/device/${target.getAttribute("data-id")}/set-output-volume`, {
           volume_percent: Number(target.value),
+        });
+      } else if (action === "set-input-volume") {
+        await postJson(`/api/audio/device/${target.getAttribute("data-id")}/set-input-volume`, {
+          volume_percent: Number(target.value),
+        });
+      } else if (action === "set-capture-gain") {
+        await postJson(`/api/audio/device/${target.getAttribute("data-id")}/set-capture-gain`, {
+          value_percent: Number(target.value),
+        });
+      } else if (action === "set-mic-boost") {
+        await postJson(`/api/audio/device/${target.getAttribute("data-id")}/set-mic-boost`, {
+          value_percent: Number(target.value),
         });
       } else if (action === "stream-volume") {
         await postJson(`/api/audio/stream/${target.getAttribute("data-stream")}/set-volume`, {
           volume_percent: Number(target.value),
         });
+      } else if (action === "test-record") {
+        const stableId = target.getAttribute("data-id");
+        const data = await postJson(`/api/audio/device/${stableId}/test-record`, { duration_sec: 3.0 });
+        const resultEl = qs(`[data-test-result="${stableId}"]`);
+        if (resultEl) {
+          resultEl.textContent = `Letzte Testaufnahme: RMS ${data.rms_percent}% | Peak ${data.peak_percent}% | Bewertung: ${data.loudness_label}`;
+        }
+        const player = qs(`[data-audio-player="${stableId}"]`);
+        if (player && data.playback_url) {
+          player.src = data.playback_url;
+          player.classList.remove("hidden");
+        }
       }
       await refreshSummaryAndTables();
       await refreshMeters();
@@ -190,7 +249,13 @@
     document.body.addEventListener("change", (ev) => {
       const t = ev.target;
       const action = t.getAttribute("data-action");
-      if (action === "set-volume" || action === "stream-volume") {
+      if (
+        action === "set-output-volume" ||
+        action === "set-input-volume" ||
+        action === "set-capture-gain" ||
+        action === "set-mic-boost" ||
+        action === "stream-volume"
+      ) {
         handleAction(ev);
       }
     });

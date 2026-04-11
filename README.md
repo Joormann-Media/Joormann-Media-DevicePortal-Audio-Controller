@@ -2,33 +2,24 @@
 
 Windows-Mixer-ahnliches Audio Control Center fur Linux (PipeWire/Pulse/ALSA) auf Flask-Basis.
 
-## Features
+## Kernpunkte
 
-- Saubere Trennung von Playback und Capture
-- Robustere Erkennung uber `pactl` / `wpctl` + ALSA-Hardware-Metadaten (`aplay -l`, `arecord -l`)
-- ALSA-Plugin-Listen (`aplay -L`, `arecord -L`) nur in Diagnose
-- Deduplizierung und Normalisierung mit `stable_id`
-- Default-Device setzen (Input/Output)
-- Lautstarke setzen (Input/Output + Stream)
-- Mute/Unmute
-- Aktive Playback-Streams anzeigen
-- Live-Update ohne Seitenreload via SSE (`/api/audio/events`)
-- Live-Metering (best effort) uber `ffmpeg` + Pulse-Source/Monitor-Source
+- Saubere Trennung: Output-Lautstarke vs. Input-/Source-Lautstarke
+- `Base Volume` separat als Referenzwert (nicht als Hauptslider)
+- Robustes Parsing von `pactl list sinks/sources` inkl. Mehrkanal-Volume (`raw/%/dB`)
+- Per-Device Fallback uber `pactl get-sink/source-volume` und `...-mute`
+- Optional erkannte Hardware-Regler (Capture Gain / Mic Boost) uber `amixer`
+- Live-Meter (RMS/Peak) und Mikrofon-Testaufnahme mit Bewertung
 
 ## Projektstruktur
 
-- `app/__init__.py`: Flask App Factory
-- `app/routes/audio.py`: UI + API Endpunkte
-- `app/services/audio_backend.py`: Rohdaten-Erfassung + Parsing
-- `app/services/audio_normalize.py`: Filter, Klassifizierung, Dedupe
-- `app/services/audio_control.py`: Control-Aktionen
-- `app/services/audio_meter.py`: Live-Pegelmessung
-- `app/services/audio_service.py`: Orchestrierung/Snapshot
-- `app/services/audio_diagnostics.py`: Diagnosepayload
-- `app/models/audio_models.py`: Datenmodelle
-- `app/templates/audio/*`: UI + Partials
-- `app/static/js/audio-controller.js`: Frontend-Logik
-- `app/static/css/audio-controller.css`: Styling
+- `app/services/audio_backend.py`: Rohdaten + Parsing (`pactl/wpctl/alsa/amixer`)
+- `app/services/audio_normalize.py`: Normalisierung, Klassifizierung, Volume-/Gain-Modell
+- `app/services/audio_control.py`: Regler setzen (output/input/gain/boost)
+- `app/services/audio_meter.py`: Live-Metering
+- `app/services/audio_recorder.py`: Testaufnahme + RMS/Peak-Analyse
+- `app/services/audio_service.py`: Orchestrierung
+- `app/routes/audio.py`: UI + API
 
 ## Installation
 
@@ -57,14 +48,24 @@ UI:
 - `GET  /api/audio/diagnostics`
 - `GET  /api/audio/meters`
 - `GET  /api/audio/events` (SSE)
+
 - `POST /api/audio/device/<stable_id>/set-default`
-- `POST /api/audio/device/<stable_id>/set-volume` body `{ "volume_percent": 55 }`
-- `POST /api/audio/device/<stable_id>/set-mute` body `{ "mute": true }`
-- `POST /api/audio/stream/<stream_id>/set-volume` body `{ "volume_percent": 70 }`
+- `POST /api/audio/device/<stable_id>/set-output-volume` body `{ "volume_percent": 40 }`
+- `POST /api/audio/device/<stable_id>/set-input-volume` body `{ "volume_percent": 100 }`
+- `POST /api/audio/device/<stable_id>/set-output-mute` body `{ "mute": true }`
+- `POST /api/audio/device/<stable_id>/set-input-mute` body `{ "mute": false }`
+- `POST /api/audio/device/<stable_id>/set-capture-gain` body `{ "value_percent": 65 }`
+- `POST /api/audio/device/<stable_id>/set-mic-boost` body `{ "value_percent": 20 }`
+- `POST /api/audio/device/<stable_id>/test-record` body `{ "duration_sec": 3 }`
+- `GET  /api/audio/device/<stable_id>/test-record/latest.wav`
 
-## Hinweise zur Robustheit
+Legacy kompatibel:
 
-- Wenn `wpctl` fehlt: App lauft weiter, reduziert auf verfugbare Backends.
-- Wenn `pactl` fehlt: viele Control-/Device-Funktionen sind eingeschrankt; Diagnose zeigt den Status.
-- Wenn `ffmpeg` fehlt: Meters zeigen `Pegel nicht verfugbar`.
-- Command-Timeouts und defensive Parser verhindern harte Absturze bei Teilfehlern.
+- `POST /api/audio/device/<stable_id>/set-volume`
+- `POST /api/audio/device/<stable_id>/set-mute`
+
+## Hinweise
+
+- Wenn `amixer` fur ein Geraet keine sinnvollen Controls liefert, werden keine Hardware-Gain-Slider angezeigt.
+- Wenn `ffmpeg` fehlt, sind Meter/Testaufnahme nicht verfugbar.
+- ALSA-Plugin-Listen (`aplay -L`/`arecord -L`) bleiben Diagnose-only.

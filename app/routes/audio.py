@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 
-from flask import Blueprint, Response, jsonify, render_template, request
+from flask import Blueprint, Response, jsonify, render_template, request, send_file
 
 from app.services.audio_service import AudioService
 
@@ -83,8 +83,86 @@ def api_set_default(stable_id: str):
     return jsonify(result), code
 
 
+@audio_bp.post("/api/audio/device/<stable_id>/set-output-volume")
+def api_set_output_volume(stable_id: str):
+    body = request.get_json(silent=True) or {}
+    if "volume_percent" not in body:
+        return jsonify({"ok": False, "error": "volume_percent required"}), 400
+    result = audio_service.set_output_volume(stable_id, int(body["volume_percent"]))
+    code = 200 if result["ok"] else 400
+    return jsonify(result), code
+
+
+@audio_bp.post("/api/audio/device/<stable_id>/set-input-volume")
+def api_set_input_volume(stable_id: str):
+    body = request.get_json(silent=True) or {}
+    if "volume_percent" not in body:
+        return jsonify({"ok": False, "error": "volume_percent required"}), 400
+    result = audio_service.set_input_volume(stable_id, int(body["volume_percent"]))
+    code = 200 if result["ok"] else 400
+    return jsonify(result), code
+
+
+@audio_bp.post("/api/audio/device/<stable_id>/set-output-mute")
+def api_set_output_mute(stable_id: str):
+    body = request.get_json(silent=True) or {}
+    if "mute" not in body:
+        return jsonify({"ok": False, "error": "mute required"}), 400
+    result = audio_service.set_output_mute(stable_id, bool(body["mute"]))
+    code = 200 if result["ok"] else 400
+    return jsonify(result), code
+
+
+@audio_bp.post("/api/audio/device/<stable_id>/set-input-mute")
+def api_set_input_mute(stable_id: str):
+    body = request.get_json(silent=True) or {}
+    if "mute" not in body:
+        return jsonify({"ok": False, "error": "mute required"}), 400
+    result = audio_service.set_input_mute(stable_id, bool(body["mute"]))
+    code = 200 if result["ok"] else 400
+    return jsonify(result), code
+
+
+@audio_bp.post("/api/audio/device/<stable_id>/set-capture-gain")
+def api_set_capture_gain(stable_id: str):
+    body = request.get_json(silent=True) or {}
+    if "value_percent" not in body:
+        return jsonify({"ok": False, "error": "value_percent required"}), 400
+    result = audio_service.set_capture_gain(stable_id, int(body["value_percent"]))
+    code = 200 if result["ok"] else 400
+    return jsonify(result), code
+
+
+@audio_bp.post("/api/audio/device/<stable_id>/set-mic-boost")
+def api_set_mic_boost(stable_id: str):
+    body = request.get_json(silent=True) or {}
+    if "value_percent" not in body:
+        return jsonify({"ok": False, "error": "value_percent required"}), 400
+    result = audio_service.set_mic_boost(stable_id, int(body["value_percent"]))
+    code = 200 if result["ok"] else 400
+    return jsonify(result), code
+
+
+@audio_bp.post("/api/audio/device/<stable_id>/test-record")
+def api_test_record(stable_id: str):
+    body = request.get_json(silent=True) or {}
+    duration = float(body.get("duration_sec", 3.0))
+    result = audio_service.test_record_input(stable_id, duration_sec=duration)
+    code = 200 if result.get("ok") else 400
+    return jsonify(result), code
+
+
+@audio_bp.get("/api/audio/device/<stable_id>/test-record/latest.wav")
+def api_latest_record_wav(stable_id: str):
+    item = audio_service.latest_recording(stable_id)
+    if not item:
+        return jsonify({"ok": False, "error": "no recording"}), 404
+    return send_file(item["file_path"], mimetype="audio/wav", as_attachment=False)
+
+
+# Backward compatibility endpoints
 @audio_bp.post("/api/audio/device/<stable_id>/set-volume")
-def api_set_volume(stable_id: str):
+def api_set_volume_legacy(stable_id: str):
     body = request.get_json(silent=True) or {}
     if "volume_percent" not in body:
         return jsonify({"ok": False, "error": "volume_percent required"}), 400
@@ -94,7 +172,7 @@ def api_set_volume(stable_id: str):
 
 
 @audio_bp.post("/api/audio/device/<stable_id>/set-mute")
-def api_set_mute(stable_id: str):
+def api_set_mute_legacy(stable_id: str):
     body = request.get_json(silent=True) or {}
     if "mute" not in body:
         return jsonify({"ok": False, "error": "mute required"}), 400

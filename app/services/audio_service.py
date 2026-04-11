@@ -11,6 +11,7 @@ from app.services.audio_control import AudioControlService
 from app.services.audio_diagnostics import build_diagnostics
 from app.services.audio_meter import AudioMeterService
 from app.services.audio_normalize import normalize_audio
+from app.services.audio_recorder import AudioRecorderService
 
 
 class AudioService:
@@ -18,6 +19,7 @@ class AudioService:
         self.backend = AudioBackend()
         self.control = AudioControlService(self.backend.runner)
         self.meter = AudioMeterService()
+        self.recorder = AudioRecorderService()
         self._lock = Lock()
 
     def build_snapshot(self, include_diagnostics: bool = False) -> Dict[str, Any]:
@@ -86,9 +88,12 @@ class AudioService:
             "meters": self.meter.get_meters(meter_devices),
         }
 
-    def set_device_default(self, stable_id: str) -> Dict[str, Any]:
+    def _lookup_device(self, stable_id: str) -> Dict[str, Any] | None:
         snapshot = self.build_snapshot(include_diagnostics=False)
-        device = snapshot["device_lookup"].get(stable_id)
+        return snapshot["device_lookup"].get(stable_id)
+
+    def set_device_default(self, stable_id: str) -> Dict[str, Any]:
+        device = self._lookup_device(stable_id)
         if not device:
             return {"ok": False, "error": "unknown device stable_id"}
         if device.get("device_class") not in {"output_device", "input_device"}:
@@ -96,26 +101,97 @@ class AudioService:
         ok, msg = self.control.set_default(device)
         return {"ok": ok, "error": "" if ok else msg}
 
-    def set_device_volume(self, stable_id: str, volume_percent: int) -> Dict[str, Any]:
-        snapshot = self.build_snapshot(include_diagnostics=False)
-        device = snapshot["device_lookup"].get(stable_id)
+    def set_output_volume(self, stable_id: str, volume_percent: int) -> Dict[str, Any]:
+        device = self._lookup_device(stable_id)
         if not device:
             return {"ok": False, "error": "unknown device stable_id"}
-        if device.get("device_class") not in {"output_device", "input_device"}:
-            return {"ok": False, "error": "device class not supported"}
-        ok, msg = self.control.set_volume(device, volume_percent)
+        if device.get("device_class") != "output_device":
+            return {"ok": False, "error": "not an output device"}
+        ok, msg = self.control.set_output_volume(device, volume_percent)
         return {"ok": ok, "error": "" if ok else msg}
 
-    def set_device_mute(self, stable_id: str, mute: bool) -> Dict[str, Any]:
-        snapshot = self.build_snapshot(include_diagnostics=False)
-        device = snapshot["device_lookup"].get(stable_id)
+    def set_input_volume(self, stable_id: str, volume_percent: int) -> Dict[str, Any]:
+        device = self._lookup_device(stable_id)
         if not device:
             return {"ok": False, "error": "unknown device stable_id"}
-        if device.get("device_class") not in {"output_device", "input_device"}:
-            return {"ok": False, "error": "device class not supported"}
-        ok, msg = self.control.set_mute(device, bool(mute))
+        if device.get("device_class") != "input_device":
+            return {"ok": False, "error": "not an input device"}
+        ok, msg = self.control.set_input_volume(device, volume_percent)
         return {"ok": ok, "error": "" if ok else msg}
+
+    def set_output_mute(self, stable_id: str, mute: bool) -> Dict[str, Any]:
+        device = self._lookup_device(stable_id)
+        if not device:
+            return {"ok": False, "error": "unknown device stable_id"}
+        if device.get("device_class") != "output_device":
+            return {"ok": False, "error": "not an output device"}
+        ok, msg = self.control.set_output_mute(device, mute)
+        return {"ok": ok, "error": "" if ok else msg}
+
+    def set_input_mute(self, stable_id: str, mute: bool) -> Dict[str, Any]:
+        device = self._lookup_device(stable_id)
+        if not device:
+            return {"ok": False, "error": "unknown device stable_id"}
+        if device.get("device_class") != "input_device":
+            return {"ok": False, "error": "not an input device"}
+        ok, msg = self.control.set_input_mute(device, mute)
+        return {"ok": ok, "error": "" if ok else msg}
+
+    def set_capture_gain(self, stable_id: str, value_percent: int) -> Dict[str, Any]:
+        device = self._lookup_device(stable_id)
+        if not device:
+            return {"ok": False, "error": "unknown device stable_id"}
+        control = device.get("capture_gain_control", "")
+        ok, msg = self.control.set_input_hw_gain(device, value_percent, control)
+        return {"ok": ok, "error": "" if ok else msg}
+
+    def set_mic_boost(self, stable_id: str, value_percent: int) -> Dict[str, Any]:
+        device = self._lookup_device(stable_id)
+        if not device:
+            return {"ok": False, "error": "unknown device stable_id"}
+        control = device.get("mic_boost_control", "")
+        ok, msg = self.control.set_input_hw_gain(device, value_percent, control)
+        return {"ok": ok, "error": "" if ok else msg}
+
+    def test_record_input(self, stable_id: str, duration_sec: float) -> Dict[str, Any]:
+        device = self._lookup_device(stable_id)
+        if not device:
+            return {"ok": False, "error": "unknown device stable_id"}
+        if device.get("device_class") != "input_device":
+            return {"ok": False, "error": "not an input device"}
+        result = self.recorder.record_source(stable_id, device.get("technical_name", ""), duration_sec=duration_sec)
+        if not result.ok:
+            return {"ok": False, "error": result.error}
+        latest = self.recorder.latest_for(stable_id) or {}
+        return {
+            "ok": True,
+            "rms_percent": result.rms_percent,
+            "peak_percent": result.peak_percent,
+            "loudness_label": result.loudness_label,
+            "duration_sec": result.duration_sec,
+            "playback_url": f"/api/audio/device/{stable_id}/test-record/latest.wav?ts={latest.get('created_ts','')}",
+        }
+
+    def latest_recording(self, stable_id: str) -> Dict[str, Any] | None:
+        return self.recorder.latest_for(stable_id)
 
     def set_stream_volume(self, stream_id: str, volume_percent: int) -> Dict[str, Any]:
         ok, msg = self.control.set_stream_volume(stream_id, volume_percent)
         return {"ok": ok, "error": "" if ok else msg}
+
+    # Backward-compatible wrappers
+    def set_device_volume(self, stable_id: str, volume_percent: int) -> Dict[str, Any]:
+        device = self._lookup_device(stable_id)
+        if not device:
+            return {"ok": False, "error": "unknown device stable_id"}
+        if device.get("device_class") == "input_device":
+            return self.set_input_volume(stable_id, volume_percent)
+        return self.set_output_volume(stable_id, volume_percent)
+
+    def set_device_mute(self, stable_id: str, mute: bool) -> Dict[str, Any]:
+        device = self._lookup_device(stable_id)
+        if not device:
+            return {"ok": False, "error": "unknown device stable_id"}
+        if device.get("device_class") == "input_device":
+            return self.set_input_mute(stable_id, mute)
+        return self.set_output_mute(stable_id, mute)

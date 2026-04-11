@@ -28,15 +28,53 @@ class AudioBackend:
             "aplay_L": ["aplay", "-L"],
             "arecord_L": ["arecord", "-L"],
             "proc_asound_cards": ["cat", "/proc/asound/cards"],
+            "amixer_scontrols": ["amixer", "scontrols"],
+            "amixer_scontents": ["amixer", "scontents"],
         }
         results: Dict[str, CommandResult] = {}
         for key, cmd in commands.items():
-            timeout = 5 if key.startswith("pactl_") else 4
+            timeout = 6 if key.startswith("pactl_") else 4
             results[key] = self.runner.run(cmd, timeout=timeout)
 
+        pactl_short_sinks = self._parse_pactl_short(results["pactl_short_sinks"].output)
+        pactl_short_sources = self._parse_pactl_short(results["pactl_short_sources"].output)
+
+        # Per-device explicit get-volume/get-mute as primary truth fallback
+        sink_probe: Dict[str, Dict[str, str]] = {}
+        for row in pactl_short_sinks:
+            name = row.get("name", "")
+            if not name:
+                continue
+            vol = self.runner.run(["pactl", "get-sink-volume", name], timeout=4)
+            mute = self.runner.run(["pactl", "get-sink-mute", name], timeout=4)
+            sink_probe[name] = {"volume": vol.output, "mute": mute.output}
+
+        source_probe: Dict[str, Dict[str, str]] = {}
+        for row in pactl_short_sources:
+            name = row.get("name", "")
+            if not name:
+                continue
+            vol = self.runner.run(["pactl", "get-source-volume", name], timeout=4)
+            mute = self.runner.run(["pactl", "get-source-mute", name], timeout=4)
+            source_probe[name] = {"volume": vol.output, "mute": mute.output}
+
+        alsa_playback_hw = self._parse_alsa_hw(results["aplay_l"].output)
+        alsa_capture_hw = self._parse_alsa_hw(results["arecord_l"].output)
+        card_indexes = sorted({row["card_index"] for row in [*alsa_playback_hw, *alsa_capture_hw]})
+
+        amixer_per_card: Dict[str, Dict[str, Any]] = {}
+        for card_idx in card_indexes:
+            sc = self.runner.run(["amixer", "-c", str(card_idx), "scontrols"], timeout=4)
+            scont = self.runner.run(["amixer", "-c", str(card_idx), "scontents"], timeout=5)
+            amixer_per_card[str(card_idx)] = {
+                "scontrols": sc.output,
+                "scontents": scont.output,
+                "parsed_controls": self._parse_amixer_scontents(scont.output),
+            }
+
         parsed = {
-            "pactl_short_sinks": self._parse_pactl_short(results["pactl_short_sinks"].output),
-            "pactl_short_sources": self._parse_pactl_short(results["pactl_short_sources"].output),
+            "pactl_short_sinks": pactl_short_sinks,
+            "pactl_short_sources": pactl_short_sources,
             "pactl_sinks": self._parse_pactl_blocks(results["pactl_sinks"].output, ["Sink", "Senke"]),
             "pactl_sources": self._parse_pactl_blocks(results["pactl_sources"].output, ["Source", "Quelle"]),
             "pactl_sink_inputs": self._parse_pactl_blocks(
@@ -45,9 +83,13 @@ class AudioBackend:
             "pactl_source_outputs": self._parse_pactl_blocks(
                 results["pactl_source_outputs"].output, ["Source Output", "Aufnahme-Stream"]
             ),
-            "alsa_playback_hw": self._parse_alsa_hw(results["aplay_l"].output),
-            "alsa_capture_hw": self._parse_alsa_hw(results["arecord_l"].output),
+            "alsa_playback_hw": alsa_playback_hw,
+            "alsa_capture_hw": alsa_capture_hw,
             "wpctl_nodes": self._parse_wpctl_nodes(results["wpctl_status"].output),
+            "sink_probe": sink_probe,
+            "source_probe": source_probe,
+            "amixer_per_card": amixer_per_card,
+            "amixer_global_controls": self._parse_amixer_scontents(results["amixer_scontents"].output),
         }
 
         defaults = {
@@ -126,13 +168,13 @@ class AudioBackend:
             if not stripped:
                 continue
 
-            if stripped == "Properties:":
+            if stripped in {"Properties:", "Eigenschaften:"}:
                 section = "properties"
                 continue
-            if stripped == "Ports:":
+            if stripped in {"Ports:", "Anschl\u00fcsse:"}:
                 section = "ports"
                 continue
-            if re.match(r"^[A-Za-z][A-Za-z \-]+:$", stripped):
+            if re.match(r"^[A-Za-z\u00c4\u00d6\u00dc\u00e4\u00f6\u00fc][A-Za-z\u00c4\u00d6\u00dc\u00e4\u00f6\u00fc \-]+:$", stripped):
                 section = ""
 
             if section == "properties":
@@ -171,8 +213,15 @@ class AudioBackend:
             "stumm": "mute",
             "stummgeschaltet": "mute",
             "mute": "mute",
-            "lautstärke": "volume",
+            "lautst\u00e4rke": "volume",
             "volume": "volume",
+            "basis_lautst\u00e4rke": "base_volume",
+            "basislautst\u00e4rke": "base_volume",
+            "basis_lautstaerke": "base_volume",
+            "basislautstaerke": "base_volume",
+            "base_volume": "base_volume",
+            "flags": "flags",
+            "merkmale": "flags",
             "abtastspezifikation": "sample_spec",
             "sample_specification": "sample_spec",
             "sample_spec": "sample_spec",
@@ -180,7 +229,6 @@ class AudioBackend:
             "channel_map": "channel_map",
             "monitor_von_senke": "monitor_of_sink",
             "monitor_of_sink": "monitor_of_sink",
-            "monitor_von_sink": "monitor_of_sink",
             "monitor_quelle": "monitor_source",
             "monitor_source": "monitor_source",
             "aktiver_port": "active_port",
@@ -236,3 +284,51 @@ class AudioBackend:
                 continue
             out.append({"wpctl_id": m.group(1), "name": m.group(2).strip(), "kind": section})
         return out
+
+    def _parse_amixer_scontents(self, text: str) -> List[Dict[str, Any]]:
+        controls: List[Dict[str, Any]] = []
+        current: Dict[str, Any] | None = None
+        start_re = re.compile(r"^Simple mixer control '(.+?)',\d+")
+        pct_re = re.compile(r"\[(\d+)%\]")
+        db_re = re.compile(r"\[(-?\d+(?:\.\d+)?)dB\]")
+
+        for line in text.splitlines():
+            m = start_re.match(line.strip())
+            if m:
+                if current:
+                    controls.append(current)
+                name = m.group(1)
+                current = {
+                    "name": name,
+                    "kind": self._classify_amixer_control(name),
+                    "percent": None,
+                    "db": None,
+                    "switch": None,
+                    "raw": [line],
+                }
+                continue
+            if not current:
+                continue
+            current["raw"].append(line)
+            p = pct_re.search(line)
+            if p and current["percent"] is None:
+                current["percent"] = int(p.group(1))
+            d = db_re.search(line)
+            if d and current["db"] is None:
+                current["db"] = float(d.group(1))
+            if "[on]" in line and current["switch"] is None:
+                current["switch"] = True
+            elif "[off]" in line and current["switch"] is None:
+                current["switch"] = False
+
+        if current:
+            controls.append(current)
+        return controls
+
+    def _classify_amixer_control(self, name: str) -> str:
+        n = name.lower()
+        if "boost" in n:
+            return "mic_boost"
+        if "capture" in n or "input gain" in n or "digital" in n or "mic" in n:
+            return "capture_gain"
+        return "unknown_input_control"

@@ -1,4 +1,4 @@
-<article class="card" data-device="{{ device.stable_id }}">
+<article class="card" data-device="{{ device.stable_id }}" data-kind="{{ device.device_class }}">
   <div class="card-head">
     <div class="dev-name">{{ device.display_name }}</div>
     <div class="badges">
@@ -8,30 +8,63 @@
     </div>
   </div>
   <div class="meta">{{ device.description or device.technical_name }}</div>
-  <div class="meta">Anschluss: {{ device.connection_label or '-' }} | Profil: {{ device.profile or '-' }}</div>
-  <div class="actions">
-    <button data-action="set-default" data-id="{{ device.stable_id }}">Als Default</button>
-    <button data-action="toggle-mute" data-id="{{ device.stable_id }}" data-mute="{% if device.muted %}0{% else %}1{% endif %}">
-      {% if device.muted %}Unmute{% else %}Mute{% endif %}
-    </button>
-    <input
-      class="range"
-      type="range"
-      min="0"
-      max="150"
-      step="1"
-      value="{{ device.volume_percent if device.volume_percent is not none else 0 }}"
-      data-action="set-volume"
-      data-id="{{ device.stable_id }}"
-    />
-    <span>{{ device.volume_percent if device.volume_percent is not none else 0 }}%</span>
-  </div>
+  <div class="meta">Anschluss: {{ device.connection_label or '-' }} | Port: {{ device.active_port or '-' }} | Profil: {{ device.profile or '-' }}</div>
+
+  {% if device.device_class == 'output_device' %}
+    <div class="meta">Basislautstarke: {{ device.base_volume_percent if device.base_volume_percent is not none else '-' }}% {% if device.base_volume_db is not none %}/ {{ device.base_volume_db }} dB{% endif %}</div>
+    <div class="actions">
+      <button data-action="set-default" data-id="{{ device.stable_id }}">Als Default</button>
+      <button data-action="set-output-mute" data-id="{{ device.stable_id }}" data-mute="{% if device.muted %}0{% else %}1{% endif %}">{% if device.muted %}Unmute{% else %}Mute{% endif %}</button>
+      <label>Output-Lautstarke:</label>
+      <input class="range" type="range" min="0" max="150" step="1" value="{{ device.volume_percent_current if device.volume_percent_current is not none else 0 }}" data-action="set-output-volume" data-id="{{ device.stable_id }}" />
+      <span>{{ device.volume_percent_current if device.volume_percent_current is not none else 0 }}%</span>
+    </div>
+    <div class="meta">Aktuell: {{ device.volume_percent_current if device.volume_percent_current is not none else '-' }}% {% if device.volume_db_current is not none %}/ {{ device.volume_db_current }} dB{% endif %}</div>
+  {% endif %}
+
+  {% if device.device_class == 'input_device' %}
+    <div class="meta">Basislautstarke: {{ device.base_volume_percent if device.base_volume_percent is not none else '-' }}% {% if device.base_volume_db is not none %}/ {{ device.base_volume_db }} dB{% endif %}</div>
+    <div class="actions">
+      <button data-action="set-default" data-id="{{ device.stable_id }}">Als Default</button>
+      <button data-action="set-input-mute" data-id="{{ device.stable_id }}" data-mute="{% if device.muted %}0{% else %}1{% endif %}">{% if device.muted %}Unmute{% else %}Mute{% endif %}</button>
+      <label>Mikrofon-Lautstarke:</label>
+      <input class="range" type="range" min="0" max="150" step="1" value="{{ device.source_volume_percent_current if device.source_volume_percent_current is not none else 0 }}" data-action="set-input-volume" data-id="{{ device.stable_id }}" />
+      <span>{{ device.source_volume_percent_current if device.source_volume_percent_current is not none else 0 }}%</span>
+    </div>
+    <div class="meta">Aktuell: {{ device.source_volume_percent_current if device.source_volume_percent_current is not none else '-' }}% {% if device.source_volume_db_current is not none %}/ {{ device.source_volume_db_current }} dB{% endif %}</div>
+
+    <div class="actions">
+      {% if device.has_capture_gain %}
+        <label>Hardware Gain:</label>
+        <input class="range" type="range" min="0" max="100" step="1" value="{{ device.capture_gain_percent if device.capture_gain_percent is not none else 0 }}" data-action="set-capture-gain" data-id="{{ device.stable_id }}" />
+        <span>{{ device.capture_gain_percent if device.capture_gain_percent is not none else 0 }}%</span>
+      {% else %}
+        <span>Hardware Gain: nicht verfugbar</span>
+      {% endif %}
+    </div>
+
+    <div class="actions">
+      {% if device.mic_boost_available %}
+        <label>Mic Boost:</label>
+        <input class="range" type="range" min="0" max="100" step="1" value="{{ device.mic_boost_percent if device.mic_boost_percent is not none else 0 }}" data-action="set-mic-boost" data-id="{{ device.stable_id }}" />
+        <span>{{ device.mic_boost_percent if device.mic_boost_percent is not none else 0 }}%</span>
+      {% else %}
+        <span>Mic Boost: nicht verfugbar</span>
+      {% endif %}
+      <button data-action="test-record" data-id="{{ device.stable_id }}">Testaufnahme</button>
+    </div>
+    <div class="meta" data-test-result="{{ device.stable_id }}">Letzte Testaufnahme: -</div>
+    <audio controls class="hidden" data-audio-player="{{ device.stable_id }}"></audio>
+  {% endif %}
+
   <div class="meter"><div class="meter-bar" data-meter="{{ device.stable_id }}"></div></div>
   <div class="meter-text" data-meter-text="{{ device.stable_id }}">Pegel wird geladen...</div>
+
   <details class="details">
     <summary>Technische Details</summary>
     <div class="meta">technical_name: {{ device.technical_name }}</div>
     <div class="meta">card: {{ device.card_name or '-' }} card_index={{ device.card_index if device.card_index is not none else '-' }} device_index={{ device.device_index if device.device_index is not none else '-' }}</div>
     <div class="meta">ports: {{ device.ports | join(', ') if device.ports else '-' }}</div>
+    <div class="meta">kanale: {{ device.channel_volumes | tojson }}</div>
   </details>
 </article>

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from typing import Any, Dict, List, Tuple
 
 from app.models.audio_models import AudioDevice, AudioStream
+
+logger = logging.getLogger(__name__)
 
 PLUGIN_KEYWORDS = {
     "null",
@@ -29,13 +32,6 @@ PLUGIN_KEYWORDS = {
 }
 
 
-def _first_percent(text: str) -> int | None:
-    m = re.search(r"(\d+)%", text or "")
-    if not m:
-        return None
-    return max(0, min(150, int(m.group(1))))
-
-
 def _parse_state(raw_state: str) -> str:
     state = (raw_state or "").strip().lower()
     if "running" in state:
@@ -51,7 +47,7 @@ def _parse_state(raw_state: str) -> str:
 
 def _is_monitor(name: str, description: str, monitor_of_sink: str) -> bool:
     s = f"{name} {description} {monitor_of_sink}".lower()
-    return ".monitor" in s or "monitor of sink" in s or "monitor" in (name or "").lower()
+    return ".monitor" in s or "monitor" in (name or "").lower()
 
 
 def _looks_like_plugin(name: str, description: str) -> bool:
@@ -72,7 +68,7 @@ def _bus_type(name: str, description: str, props: Dict[str, str]) -> str:
         return "usb"
     if "hdmi" in text:
         return "hdmi"
-    if "displayport" in text or "dp " in text or " dp" in text:
+    if "displayport" in text or " dp" in text:
         return "displayport"
     if "analog" in text or "lineout" in text or "headphone" in text or "mic" in text:
         return "analog"
@@ -134,6 +130,94 @@ def _match_alsa_card(card_name: str, alsa_hw: List[Dict[str, Any]]) -> Tuple[int
     return None, None, False
 
 
+def _parse_mute(value: str) -> bool:
+    v = (value or "").strip().lower()
+    return v in {"yes", "ja", "true", "on"}
+
+
+def _parse_volume_payload(text: str) -> Dict[str, Any]:
+    # Parses lines like:
+    # front-left: 26241 / 40% / -23.85 dB, front-right: 26241 / 40% / -23.85 dB
+    # Volume: mono: 65536 / 100% / 0.00 dB
+    channel_re = re.compile(
+        r"([a-z0-9\-_]+(?:\s+[a-z0-9\-_]+)*)\s*:\s*(\d+)\s*/\s*(-?\d+)%\s*/\s*(-?\d+(?:[\.,]\d+)?)\s*dB",
+        re.IGNORECASE,
+    )
+    channels: List[Dict[str, Any]] = []
+    for m in channel_re.finditer(text or ""):
+        channels.append(
+            {
+                "channel": m.group(1).strip().lower(),
+                "raw": int(m.group(2)),
+                "percent": int(m.group(3)),
+                "db": float(m.group(4).replace(",", ".")),
+            }
+        )
+    if not channels:
+        simple = re.search(r"(\d+)\s*/\s*(-?\d+)%\s*/\s*(-?\d+(?:[\.,]\d+)?)\s*dB", text or "", re.IGNORECASE)
+        if simple:
+            channels.append(
+                {
+                    "channel": "master",
+                    "raw": int(simple.group(1)),
+                    "percent": int(simple.group(2)),
+                    "db": float(simple.group(3).replace(",", ".")),
+                }
+            )
+
+    if not channels:
+        return {
+            "percent": None,
+            "db": None,
+            "raw": None,
+            "channels": [],
+        }
+
+    primary = channels[0]
+    if len(channels) > 1:
+        avg_percent = int(round(sum(c["percent"] for c in channels) / len(channels)))
+        avg_db = round(sum(c["db"] for c in channels) / len(channels), 2)
+        avg_raw = int(round(sum(c["raw"] for c in channels) / len(channels)))
+    else:
+        avg_percent, avg_db, avg_raw = primary["percent"], primary["db"], primary["raw"]
+
+    return {
+        "percent": avg_percent,
+        "db": avg_db,
+        "raw": avg_raw,
+        "channels": channels,
+    }
+
+
+def _parse_flags(raw_flags: str) -> Tuple[bool, bool]:
+    flags = (raw_flags or "").upper()
+    return ("HW_VOLUME_CTRL" in flags or "HARDWARE" in flags), ("HW_MUTE_CTRL" in flags)
+
+
+def _choose_amixer_controls(card_idx: int | None, amixer_per_card: Dict[str, Any]) -> Dict[str, Any]:
+    if card_idx is None:
+        return {
+            "capture_gain": None,
+            "mic_boost": None,
+            "controls": [],
+        }
+    card = amixer_per_card.get(str(card_idx), {})
+    controls = card.get("parsed_controls", [])
+    capture = None
+    boost = None
+    for c in controls:
+        kind = c.get("kind")
+        if kind == "capture_gain" and capture is None:
+            capture = c
+        if kind == "mic_boost" and boost is None:
+            boost = c
+    return {
+        "capture_gain": capture,
+        "mic_boost": boost,
+        "controls": controls,
+    }
+
+
 def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
     parsed = raw["parsed"]
     defaults = raw["defaults"]
@@ -143,8 +227,7 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
     short_sink_by_name = {row.get("name", ""): row for row in parsed["pactl_short_sinks"] if row.get("name")}
     short_source_by_name = {row.get("name", ""): row for row in parsed["pactl_short_sources"] if row.get("name")}
 
-    # Locale-/format-robuster Fallback: Wenn "pactl list sinks/sources" nicht parsebar ist,
-    # nutzen wir "pactl list short ..." für eine minimale, aber brauchbare Geräteliste.
+    # Locale/format fallback
     if not pactl_sinks and parsed["pactl_short_sinks"]:
         for row in parsed["pactl_short_sinks"]:
             pactl_sinks.append(
@@ -155,6 +238,8 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
                     "state": row.get("state", ""),
                     "mute": "no",
                     "volume": "",
+                    "base_volume": "",
+                    "flags": "",
                     "sample_spec": row.get("sample_spec", ""),
                     "channel_map": "",
                     "monitor_source": f"{row.get('name', '')}.monitor",
@@ -173,6 +258,8 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
                     "state": row.get("state", ""),
                     "mute": "no",
                     "volume": "",
+                    "base_volume": "",
+                    "flags": "",
                     "sample_spec": row.get("sample_spec", ""),
                     "channel_map": "",
                     "monitor_of_sink": "yes" if name.endswith(".monitor") else "",
@@ -192,6 +279,7 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
     for sink in pactl_sinks:
         tech_name = sink.get("name", "")
         short_sink = short_sink_by_name.get(tech_name, {})
+        probe = parsed["sink_probe"].get(tech_name, {})
         props = sink.get("properties", {})
         desc = sink.get("description", props.get("device.description", ""))
         looks_plugin = _looks_like_plugin(tech_name, desc)
@@ -199,6 +287,13 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
         card_name = props.get("alsa.card_name", props.get("device.product.name", ""))
         card_idx, dev_idx, hw_present = _match_alsa_card(card_name, parsed["alsa_playback_hw"])
         state = _parse_state(sink.get("state", "") or short_sink.get("state", ""))
+
+        current_vol = _parse_volume_payload(sink.get("volume", "") or probe.get("volume", ""))
+        base_vol = _parse_volume_payload(sink.get("base_volume", ""))
+        has_hw_volume, has_hw_mute = _parse_flags(sink.get("flags", ""))
+        muted = _parse_mute(sink.get("mute", "") or probe.get("mute", ""))
+
+        logger.debug("sink %s parsed current=%s base=%s", tech_name, current_vol, base_vol)
 
         device = AudioDevice(
             stable_id=_stable_id("output_device", tech_name, card_name),
@@ -215,14 +310,23 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
             ports=[p for p in list(sink.get("ports", {}).keys()) if p.lower() != "active port"],
             state=state,
             default=(tech_name == defaults.get("sink")),
-            muted=(sink.get("mute", "").lower() == "yes"),
-            volume_percent=_first_percent(sink.get("volume", "")),
+            muted=muted,
             channels=sink.get("channel_map", ""),
             sample_rate=sink.get("sample_spec", "") or short_sink.get("sample_spec", ""),
             description=desc,
             hardware_present=hw_present,
             physical_likely=(not looks_plugin and bus != "virtual"),
             monitor_source_name=sink.get("monitor_source", ""),
+            active_port=sink.get("active_port", ""),
+            volume_percent_current=current_vol["percent"],
+            volume_db_current=current_vol["db"],
+            volume_raw_current=current_vol["raw"],
+            base_volume_percent=base_vol["percent"],
+            base_volume_db=base_vol["db"],
+            has_hw_volume=has_hw_volume,
+            has_hw_mute=has_hw_mute,
+            channel_volumes=current_vol["channels"],
+            volume_percent=current_vol["percent"],
         )
 
         if looks_plugin:
@@ -238,6 +342,7 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
     for source in pactl_sources:
         tech_name = source.get("name", "")
         short_source = short_source_by_name.get(tech_name, {})
+        probe = parsed["source_probe"].get(tech_name, {})
         props = source.get("properties", {})
         desc = source.get("description", props.get("device.description", ""))
         monitor_of_sink = source.get("monitor_of_sink", "")
@@ -247,11 +352,28 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
         card_name = props.get("alsa.card_name", props.get("device.product.name", ""))
         card_idx, dev_idx, hw_present = _match_alsa_card(card_name, parsed["alsa_capture_hw"])
         state = _parse_state(source.get("state", "") or short_source.get("state", ""))
+        has_hw_volume, has_hw_mute = _parse_flags(source.get("flags", ""))
+        source_vol = _parse_volume_payload(source.get("volume", "") or probe.get("volume", ""))
+        base_vol = _parse_volume_payload(source.get("base_volume", ""))
+        muted = _parse_mute(source.get("mute", "") or probe.get("mute", ""))
+        mixer = _choose_amixer_controls(card_idx, parsed["amixer_per_card"])
 
         if is_monitor:
             cls = "output_monitor"
         else:
             cls = "input_device"
+
+        logger.debug(
+            "source %s parsed current=%s base=%s amixer_capture=%s amixer_boost=%s",
+            tech_name,
+            source_vol,
+            base_vol,
+            mixer["capture_gain"],
+            mixer["mic_boost"],
+        )
+
+        capture_gain = mixer["capture_gain"]
+        mic_boost = mixer["mic_boost"]
 
         device = AudioDevice(
             stable_id=_stable_id(cls, tech_name, card_name),
@@ -268,14 +390,32 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
             ports=[p for p in list(source.get("ports", {}).keys()) if p.lower() != "active port"],
             state=state,
             default=(tech_name == defaults.get("source")),
-            muted=(source.get("mute", "").lower() == "yes"),
-            volume_percent=_first_percent(source.get("volume", "")),
+            muted=muted,
             channels=source.get("channel_map", ""),
             sample_rate=source.get("sample_spec", "") or short_source.get("sample_spec", ""),
             description=desc,
             hardware_present=hw_present,
             physical_likely=(not looks_plugin and not is_monitor and bus != "virtual"),
             monitor_source_name="",
+            active_port=source.get("active_port", ""),
+            source_volume_percent_current=source_vol["percent"],
+            source_volume_db_current=source_vol["db"],
+            source_volume_raw_current=source_vol["raw"],
+            base_volume_percent=base_vol["percent"],
+            base_volume_db=base_vol["db"],
+            has_hw_volume=has_hw_volume,
+            has_hw_mute=has_hw_mute,
+            has_capture_gain=bool(capture_gain),
+            capture_gain_percent=(capture_gain or {}).get("percent"),
+            capture_gain_db=(capture_gain or {}).get("db"),
+            capture_gain_control=(capture_gain or {}).get("name", ""),
+            mic_boost_available=bool(mic_boost),
+            mic_boost_percent=(mic_boost or {}).get("percent"),
+            mic_boost_db=(mic_boost or {}).get("db"),
+            mic_boost_control=(mic_boost or {}).get("name", ""),
+            channel_volumes=source_vol["channels"],
+            hw_controls=mixer["controls"],
+            volume_percent=source_vol["percent"],
         )
 
         if cls == "output_monitor":
@@ -290,7 +430,10 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
         else:
             input_devices.append(device)
 
-    devices_by_stable_id = {d.stable_id: d for d in [*output_devices, *input_devices, *monitor_devices, *virtual_devices, *hidden_diagnostic_only]}
+    devices_by_stable_id = {
+        d.stable_id: d
+        for d in [*output_devices, *input_devices, *monitor_devices, *virtual_devices, *hidden_diagnostic_only]
+    }
     tech_to_stable = {d.technical_name: d.stable_id for d in devices_by_stable_id.values()}
 
     streams: List[AudioStream] = []
@@ -303,6 +446,7 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
                 sink_name = sk.get("name", "")
                 break
         target_stable = tech_to_stable.get(sink_name, "")
+        volume = _parse_volume_payload(stream.get("volume", ""))
         streams.append(
             AudioStream(
                 stream_id=f"sink-input-{stream.get('index', '')}",
@@ -312,8 +456,8 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
                 process_id=props.get("application.process.id", ""),
                 target_device_stable_id=target_stable,
                 target_device_name=sink_name,
-                muted=(stream.get("mute", "").lower() == "yes"),
-                volume_percent=_first_percent(stream.get("volume", "")),
+                muted=_parse_mute(stream.get("mute", "")),
+                volume_percent=volume["percent"],
                 state="running",
                 technical_name=props.get("media.name", ""),
             )

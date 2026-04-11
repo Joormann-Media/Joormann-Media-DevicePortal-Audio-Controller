@@ -16,7 +16,7 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
 echo "[4/4] Optional empfohlene Systemtools prüfen"
-for cmd in wpctl pactl aplay arecord ffmpeg; do
+for cmd in wpctl pactl aplay arecord amixer ffmpeg; do
   if command -v "$cmd" >/dev/null 2>&1; then
     echo "  - $cmd: OK"
   else
