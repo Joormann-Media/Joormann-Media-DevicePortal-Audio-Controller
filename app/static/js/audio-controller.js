@@ -20,7 +20,7 @@
     if (!bar || !text) return;
     if (!value || !value.available) {
       bar.style.width = "0%";
-      text.textContent = "Pegel nicht verfugbar";
+      text.textContent = "Pegel nicht verfügbar";
       return;
     }
     bar.style.width = `${value.peak_percent}%`;
@@ -340,7 +340,7 @@
     await refreshSummaryAndTables();
     await refreshMeters();
     setupSse();
-    setInterval(refreshMeters, 1200);
+    setInterval(refreshMeters, 450);
   }
 
   init().catch((err) => {
