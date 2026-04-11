@@ -1,0 +1,7 @@
+<p class="meta">
+  Diagnose zeigt Rohdaten (pactl/wpctl/alsa inkl. aplay -L/arecord -L Plugins) getrennt von der Hauptansicht.
+</p>
+<pre id="diag-json">{{ {
+  "diagnostics": snapshot.diagnostics,
+  "hidden_diagnostic_only": snapshot.hidden_diagnostic_only
+} | tojson(indent=2) }}</pre>

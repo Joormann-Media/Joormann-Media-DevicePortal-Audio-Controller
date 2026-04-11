@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Audio Control Center</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/audio-controller.css') }}" />
+  </head>
+  <body>
+    <main class="wrap">
+      <header class="topbar">
+        <div class="title">
+          <h1>Audio Control Center</h1>
+          <p>Playback und Capture fur Linux (PipeWire/Pulse/ALSA)</p>
+        </div>
+        <div class="controls">
+          <button id="refresh-btn" class="primary">Aktualisieren</button>
+          <button id="expert-toggle">{% if expert_mode %}Expertenmodus aus{% else %}Expertenmodus an{% endif %}</button>
+          <span id="status">Bereit</span>
+        </div>
+      </header>
+
+      <section class="summary">
+        <article class="kpi"><div class="label">Hostname</div><div class="value">{{ snapshot.summary.hostname }}</div></article>
+        <article class="kpi"><div class="label">Outputs</div><div class="value" data-kpi="outputs">{{ snapshot.summary.outputs_count }}</div></article>
+        <article class="kpi"><div class="label">Inputs</div><div class="value" data-kpi="inputs">{{ snapshot.summary.inputs_count }}</div></article>
+        <article class="kpi"><div class="label">Default Output</div><div class="value" data-kpi="default-output">{{ snapshot.summary.default_output }}</div></article>
+        <article class="kpi"><div class="label">Default Input</div><div class="value" data-kpi="default-input">{{ snapshot.summary.default_input }}</div></article>
+        <article class="kpi"><div class="label">WirePlumber/PipeWire</div><div class="value">{{ snapshot.summary.wireplumber_status }}</div></article>
+        <article class="kpi"><div class="label">Letztes Update (UTC)</div><div class="value" data-kpi="updated">{{ snapshot.timestamp_utc }}</div></article>
+      </section>
+
+      <section class="section">
+        <h2>Ausgabegerate</h2>
+        <div id="outputs" class="grid">
+          {% for device in snapshot.devices.outputs %}
+            {% include "audio/_device_card.html" %}
+          {% endfor %}
+          {% if not snapshot.devices.outputs %}
+            <article class="card"><div class="meta">Keine Ausgabegerate gefunden.</div></article>
+          {% endif %}
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>Eingabegerate</h2>
+        <div id="inputs" class="grid">
+          {% for device in snapshot.devices.inputs %}
+            {% include "audio/_device_card.html" %}
+          {% endfor %}
+          {% if not snapshot.devices.inputs %}
+            <article class="card"><div class="meta">Keine Eingabegerate gefunden.</div></article>
+          {% endif %}
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>Anwendungen / Streams</h2>
+        <table class="stream-table">
+          <thead>
+            <tr>
+              <th>App</th>
+              <th>Prozess</th>
+              <th>Zielgerat</th>
+              <th>Volume</th>
+              <th>Status</th>
+              <th>ID</th>
+            </tr>
+          </thead>
+          <tbody id="streams-body">
+            {% for stream in snapshot.streams %}
+              {% include "audio/_stream_row.html" %}
+            {% endfor %}
+            {% if not snapshot.streams %}
+              <tr><td colspan="6">Keine aktiven Streams erkannt.</td></tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </section>
+
+      {% if expert_mode %}
+        <section class="section">
+          <h2>Diagnose / Expertenmodus</h2>
+          {% include "audio/_diagnostics.html" %}
+        </section>
+      {% endif %}
+    </main>
+
+    <script>
+      window.AUDIO_BOOTSTRAP = {
+        snapshot_hash: {{ snapshot.snapshot_hash | tojson }},
+        expert_mode: {{ expert_mode | tojson }}
+      };
+    </script>
+    <script src="{{ url_for('static', filename='js/audio-controller.js') }}"></script>
+  </body>
+</html>

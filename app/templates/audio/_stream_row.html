@@ -1,0 +1,19 @@
+<tr>
+  <td>{{ stream.app_name }}</td>
+  <td>{{ stream.process_name or '-' }}</td>
+  <td>{{ stream.target_device_name or '-' }}</td>
+  <td>
+    <input
+      type="range"
+      min="0"
+      max="150"
+      step="1"
+      value="{{ stream.volume_percent if stream.volume_percent is not none else 0 }}"
+      data-action="stream-volume"
+      data-stream="{{ stream.stream_id }}"
+    />
+    <span>{{ stream.volume_percent if stream.volume_percent is not none else 0 }}%</span>
+  </td>
+  <td>{% if stream.muted %}muted{% else %}active{% endif %}</td>
+  <td>{{ stream.stream_id }}</td>
+</tr>

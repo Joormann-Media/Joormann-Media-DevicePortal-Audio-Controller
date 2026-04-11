@@ -1,0 +1,37 @@
+<article class="card" data-device="{{ device.stable_id }}">
+  <div class="card-head">
+    <div class="dev-name">{{ device.display_name }}</div>
+    <div class="badges">
+      {% if device.default %}<span class="badge default">Default</span>{% endif %}
+      <span class="badge">{{ device.bus_type }}</span>
+      <span class="badge state-{{ device.state }}">{{ device.state }}</span>
+    </div>
+  </div>
+  <div class="meta">{{ device.description or device.technical_name }}</div>
+  <div class="meta">Anschluss: {{ device.connection_label or '-' }} | Profil: {{ device.profile or '-' }}</div>
+  <div class="actions">
+    <button data-action="set-default" data-id="{{ device.stable_id }}">Als Default</button>
+    <button data-action="toggle-mute" data-id="{{ device.stable_id }}" data-mute="{% if device.muted %}0{% else %}1{% endif %}">
+      {% if device.muted %}Unmute{% else %}Mute{% endif %}
+    </button>
+    <input
+      class="range"
+      type="range"
+      min="0"
+      max="150"
+      step="1"
+      value="{{ device.volume_percent if device.volume_percent is not none else 0 }}"
+      data-action="set-volume"
+      data-id="{{ device.stable_id }}"
+    />
+    <span>{{ device.volume_percent if device.volume_percent is not none else 0 }}%</span>
+  </div>
+  <div class="meter"><div class="meter-bar" data-meter="{{ device.stable_id }}"></div></div>
+  <div class="meter-text" data-meter-text="{{ device.stable_id }}">Pegel wird geladen...</div>
+  <details class="details">
+    <summary>Technische Details</summary>
+    <div class="meta">technical_name: {{ device.technical_name }}</div>
+    <div class="meta">card: {{ device.card_name or '-' }} card_index={{ device.card_index if device.card_index is not none else '-' }} device_index={{ device.device_index if device.device_index is not none else '-' }}</div>
+    <div class="meta">ports: {{ device.ports | join(', ') if device.ports else '-' }}</div>
+  </details>
+</article>
