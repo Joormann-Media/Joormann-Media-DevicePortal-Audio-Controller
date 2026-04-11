@@ -140,6 +140,8 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
 
     pactl_sinks = parsed["pactl_sinks"][:]
     pactl_sources = parsed["pactl_sources"][:]
+    short_sink_by_name = {row.get("name", ""): row for row in parsed["pactl_short_sinks"] if row.get("name")}
+    short_source_by_name = {row.get("name", ""): row for row in parsed["pactl_short_sources"] if row.get("name")}
 
     # Locale-/format-robuster Fallback: Wenn "pactl list sinks/sources" nicht parsebar ist,
     # nutzen wir "pactl list short ..." für eine minimale, aber brauchbare Geräteliste.
@@ -189,13 +191,14 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
 
     for sink in pactl_sinks:
         tech_name = sink.get("name", "")
+        short_sink = short_sink_by_name.get(tech_name, {})
         props = sink.get("properties", {})
         desc = sink.get("description", props.get("device.description", ""))
         looks_plugin = _looks_like_plugin(tech_name, desc)
         bus = _bus_type(tech_name, desc, props)
         card_name = props.get("alsa.card_name", props.get("device.product.name", ""))
         card_idx, dev_idx, hw_present = _match_alsa_card(card_name, parsed["alsa_playback_hw"])
-        state = _parse_state(sink.get("state", ""))
+        state = _parse_state(sink.get("state", "") or short_sink.get("state", ""))
 
         device = AudioDevice(
             stable_id=_stable_id("output_device", tech_name, card_name),
@@ -215,7 +218,7 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
             muted=(sink.get("mute", "").lower() == "yes"),
             volume_percent=_first_percent(sink.get("volume", "")),
             channels=sink.get("channel_map", ""),
-            sample_rate=sink.get("sample_spec", ""),
+            sample_rate=sink.get("sample_spec", "") or short_sink.get("sample_spec", ""),
             description=desc,
             hardware_present=hw_present,
             physical_likely=(not looks_plugin and bus != "virtual"),
@@ -234,6 +237,7 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
 
     for source in pactl_sources:
         tech_name = source.get("name", "")
+        short_source = short_source_by_name.get(tech_name, {})
         props = source.get("properties", {})
         desc = source.get("description", props.get("device.description", ""))
         monitor_of_sink = source.get("monitor_of_sink", "")
@@ -242,7 +246,7 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
         bus = _bus_type(tech_name, desc, props)
         card_name = props.get("alsa.card_name", props.get("device.product.name", ""))
         card_idx, dev_idx, hw_present = _match_alsa_card(card_name, parsed["alsa_capture_hw"])
-        state = _parse_state(source.get("state", ""))
+        state = _parse_state(source.get("state", "") or short_source.get("state", ""))
 
         if is_monitor:
             cls = "output_monitor"
@@ -267,7 +271,7 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
             muted=(source.get("mute", "").lower() == "yes"),
             volume_percent=_first_percent(source.get("volume", "")),
             channels=source.get("channel_map", ""),
-            sample_rate=source.get("sample_spec", ""),
+            sample_rate=source.get("sample_spec", "") or short_source.get("sample_spec", ""),
             description=desc,
             hardware_present=hw_present,
             physical_likely=(not looks_plugin and not is_monitor and bus != "virtual"),

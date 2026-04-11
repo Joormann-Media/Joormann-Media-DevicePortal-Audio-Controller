@@ -149,12 +149,48 @@ class AudioBackend:
 
             m = key_value_re.match(line)
             if m:
-                key = m.group(1).strip().lower().replace(" ", "_")
+                key = self._canonical_pactl_key(m.group(1))
                 current[key] = m.group(2).strip()
 
         if current:
             blocks.append(current)
         return blocks
+
+    def _canonical_pactl_key(self, raw_key: str) -> str:
+        key = raw_key.strip().lower().replace(" ", "_").replace("-", "_")
+        key = key.replace("__", "_")
+        mapping = {
+            "name": "name",
+            "beschreibung": "description",
+            "description": "description",
+            "treiber": "driver",
+            "driver": "driver",
+            "status": "state",
+            "zustand": "state",
+            "state": "state",
+            "stumm": "mute",
+            "stummgeschaltet": "mute",
+            "mute": "mute",
+            "lautstärke": "volume",
+            "volume": "volume",
+            "abtastspezifikation": "sample_spec",
+            "sample_specification": "sample_spec",
+            "sample_spec": "sample_spec",
+            "kanalzuordnung": "channel_map",
+            "channel_map": "channel_map",
+            "monitor_von_senke": "monitor_of_sink",
+            "monitor_of_sink": "monitor_of_sink",
+            "monitor_von_sink": "monitor_of_sink",
+            "monitor_quelle": "monitor_source",
+            "monitor_source": "monitor_source",
+            "aktiver_port": "active_port",
+            "active_port": "active_port",
+            "senke": "sink",
+            "sink": "sink",
+            "quelle": "source",
+            "source": "source",
+        }
+        return mapping.get(key, key)
 
     def _parse_alsa_hw(self, text: str) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
