@@ -8,6 +8,7 @@ from threading import Lock
 from typing import Any, Dict
 
 from app.services.audio_backend import AudioBackend
+from app.services.audio_calibration import AudioCalibrationService
 from app.services.audio_control import AudioControlService
 from app.services.audio_diagnostics import build_diagnostics
 from app.services.audio_meter import AudioMeterService
@@ -21,6 +22,7 @@ class AudioService:
         self.control = AudioControlService(self.backend.runner)
         self.meter = AudioMeterService()
         self.recorder = AudioRecorderService()
+        self.calibration = AudioCalibrationService(self.recorder)
         self._lock = Lock()
         self._snapshot_cache: Dict[str, Any] | None = None
         self._snapshot_cache_ts: float = 0.0
@@ -270,6 +272,64 @@ class AudioService:
     def set_stream_volume(self, stream_id: str, volume_percent: int) -> Dict[str, Any]:
         ok, msg = self.control.set_stream_volume(stream_id, volume_percent)
         return {"ok": ok, "error": "" if ok else msg}
+
+    def calibrate_input(self, stable_id: str, duration_sec: float = 4.0) -> Dict[str, Any]:
+        device = self._lookup_device(stable_id)
+        if not device:
+            return {"ok": False, "error": "unknown device stable_id"}
+        if device.get("device_class") != "input_device":
+            return {"ok": False, "error": "not an input device"}
+        return self.calibration.calibrate(device, duration_sec=duration_sec)
+
+    def get_input_calibration(self, stable_id: str) -> Dict[str, Any]:
+        item = self.calibration.get_latest(stable_id)
+        if item is None:
+            return {"ok": False, "error": "no calibration"}
+        return {"ok": True, "calibration": item}
+
+    def get_calibration_recording_file(self, stable_id: str) -> str | None:
+        return self.calibration.get_latest_recording_file(stable_id)
+
+    def apply_calibration_recommendation(self, stable_id: str) -> Dict[str, Any]:
+        device = self._lookup_device(stable_id)
+        if not device:
+            return {"ok": False, "error": "unknown device stable_id"}
+        if device.get("device_class") != "input_device":
+            return {"ok": False, "error": "not an input device"}
+
+        latest = self.calibration.get_latest(stable_id)
+        if latest is None:
+            return {"ok": False, "error": "no calibration"}
+
+        recommendation = latest.get("recommendation", {}) if isinstance(latest, dict) else {}
+        if not isinstance(recommendation, dict):
+            return {"ok": False, "error": "invalid recommendation"}
+        if not bool(recommendation.get("applicable", False)):
+            return {"ok": False, "error": "no applicable recommendation"}
+
+        applied: Dict[str, Any] = {}
+        errors: list[str] = []
+
+        source_suggested = recommendation.get("suggest_source_volume_percent")
+        if isinstance(source_suggested, int):
+            result = self.set_input_volume(stable_id, source_suggested)
+            if result.get("ok"):
+                applied["source_volume_percent"] = source_suggested
+            else:
+                errors.append(str(result.get("error", "set_input_volume failed")))
+
+        hw_suggested = recommendation.get("suggest_hardware_gain_percent")
+        if isinstance(hw_suggested, int):
+            result = self.set_hardware_gain(stable_id, value_percent=hw_suggested)
+            if result.get("ok"):
+                applied["hardware_gain_percent"] = hw_suggested
+            else:
+                errors.append(str(result.get("error", "set_hardware_gain failed")))
+
+        if not applied:
+            return {"ok": False, "error": "nothing applied", "errors": errors}
+
+        return {"ok": True, "applied": applied, "errors": errors}
 
     # Backward-compatible wrappers
     def set_device_volume(self, stable_id: str, volume_percent: int) -> Dict[str, Any]:

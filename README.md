@@ -61,6 +61,10 @@ UI:
 - `POST /api/audio/device/<stable_id>/set-alsa-switch` body `{ "control_name": "Mic", "switch_on": true }`
 - `POST /api/audio/device/<stable_id>/test-record` body `{ "duration_sec": 3 }`
 - `GET  /api/audio/device/<stable_id>/test-record/latest.wav`
+- `POST /api/audio/device/<stable_id>/calibrate-input` body `{ "duration_sec": 4 }` (optional)
+- `GET  /api/audio/device/<stable_id>/calibration`
+- `POST /api/audio/device/<stable_id>/apply-calibration-recommendation` (optional)
+- `GET  /api/audio/device/<stable_id>/calibration/latest.wav`
 
 Legacy kompatibel:
 

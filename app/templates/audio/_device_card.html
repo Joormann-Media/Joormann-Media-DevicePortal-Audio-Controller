@@ -77,6 +77,12 @@
         {% endif %}
       {% endif %}
     {% endfor %}
+    <div class="actions">
+      <button data-action="calibrate-input" data-id="{{ device.stable_id }}">Mikrofon kalibrieren</button>
+    </div>
+    <div class="calibration-box" data-calibration="{{ device.stable_id }}">
+      <div class="meta">Noch keine Kalibrierung vorhanden.</div>
+    </div>
     <div class="meta" data-test-result="{{ device.stable_id }}">Letzte Testaufnahme: -</div>
     <audio controls class="hidden" data-audio-player="{{ device.stable_id }}"></audio>
   {% endif %}

@@ -53,6 +53,7 @@
     renderDevices("output", devicesData.devices.outputs || []);
     renderDevices("input", devicesData.devices.inputs || []);
     renderStreams(streamsData.streams || []);
+    await loadCalibrations(devicesData.devices.inputs || []);
 
     if (state.expertMode) {
       const diag = await getJson("/api/audio/diagnostics");
@@ -61,6 +62,41 @@
         pre.textContent = JSON.stringify(diag, null, 2);
       }
     }
+  }
+
+  function renderCalibration(stableId, payload) {
+    const box = qs(`[data-calibration="${stableId}"]`);
+    if (!box) return;
+    if (!payload || !payload.ok || !payload.calibration) {
+      box.innerHTML = `<div class="meta">Noch keine Kalibrierung vorhanden.</div>`;
+      return;
+    }
+    const cal = payload.calibration;
+    const a = cal.analysis || {};
+    const rec = cal.recommendation || {};
+    const applyBtn = rec.applicable
+      ? `<button data-action="apply-calibration" data-id="${stableId}">Empfehlung übernehmen</button>`
+      : "";
+    box.innerHTML = `
+      <div class="meta"><strong>Kalibrierung:</strong> ${escapeHtml(cal.message || "-")}</div>
+      <div class="meta">RMS: ${a.rms_percent ?? "-"}% / ${a.rms_dbfs ?? "-"} dBFS | Peak: ${a.peak_percent ?? "-"}% / ${a.peak_dbfs ?? "-"} dBFS</div>
+      <div class="meta">Stille-Anteil: ${a.silence_ratio ?? "-"} | Noise Floor: ${a.noise_floor_percent ?? "-"}%</div>
+      <div class="meta"><strong>Empfehlung:</strong> ${escapeHtml(rec.summary || "Keine")}</div>
+      <div class="meta">Vorschlag Source: ${rec.suggest_source_volume_percent ?? "-"}% | Hardware Gain: ${rec.suggest_hardware_gain_percent ?? "-"}%</div>
+      <div class="actions">${applyBtn}</div>
+    `;
+  }
+
+  async function loadCalibrations(inputDevices) {
+    const tasks = (inputDevices || []).map(async (d) => {
+      try {
+        const data = await getJson(`/api/audio/device/${d.stable_id}/calibration`);
+        renderCalibration(d.stable_id, data);
+      } catch (_err) {
+        renderCalibration(d.stable_id, null);
+      }
+    });
+    await Promise.all(tasks);
   }
 
   function volumeForDevice(d, kind) {
@@ -285,6 +321,19 @@
           player.src = data.playback_url;
           player.classList.remove("hidden");
         }
+      } else if (action === "calibrate-input") {
+        const stableId = target.getAttribute("data-id");
+        const box = qs(`[data-calibration="${stableId}"]`);
+        if (box) {
+          box.innerHTML = `<div class="meta">Kalibrierung läuft... Bitte normal sprechen (3-5 Sekunden).</div>`;
+        }
+        const data = await postJson(`/api/audio/device/${stableId}/calibrate-input`, { duration_sec: 4.0 });
+        renderCalibration(stableId, data);
+      } else if (action === "apply-calibration") {
+        const stableId = target.getAttribute("data-id");
+        await postJson(`/api/audio/device/${stableId}/apply-calibration-recommendation`, {});
+        const cal = await getJson(`/api/audio/device/${stableId}/calibration`);
+        renderCalibration(stableId, cal);
       }
       await refreshSummaryAndTables();
       await refreshMeters();

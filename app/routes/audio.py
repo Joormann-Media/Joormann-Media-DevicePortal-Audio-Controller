@@ -201,12 +201,43 @@ def api_test_record(stable_id: str):
     return jsonify(result), code
 
 
+@audio_bp.post("/api/audio/device/<stable_id>/calibrate-input")
+def api_calibrate_input(stable_id: str):
+    body = request.get_json(silent=True) or {}
+    duration_sec = float(body.get("duration_sec", 4.0))
+    result = audio_service.calibrate_input(stable_id, duration_sec=duration_sec)
+    code = 200 if result.get("ok") else 400
+    return jsonify(result), code
+
+
+@audio_bp.get("/api/audio/device/<stable_id>/calibration")
+def api_get_calibration(stable_id: str):
+    result = audio_service.get_input_calibration(stable_id)
+    code = 200 if result.get("ok") else 404
+    return jsonify(result), code
+
+
+@audio_bp.post("/api/audio/device/<stable_id>/apply-calibration-recommendation")
+def api_apply_calibration(stable_id: str):
+    result = audio_service.apply_calibration_recommendation(stable_id)
+    code = 200 if result.get("ok") else 400
+    return jsonify(result), code
+
+
 @audio_bp.get("/api/audio/device/<stable_id>/test-record/latest.wav")
 def api_latest_record_wav(stable_id: str):
     item = audio_service.latest_recording(stable_id)
     if not item:
         return jsonify({"ok": False, "error": "no recording"}), 404
     return send_file(item["file_path"], mimetype="audio/wav", as_attachment=False)
+
+
+@audio_bp.get("/api/audio/device/<stable_id>/calibration/latest.wav")
+def api_latest_calibration_wav(stable_id: str):
+    file_path = audio_service.get_calibration_recording_file(stable_id)
+    if not file_path:
+        return jsonify({"ok": False, "error": "no calibration recording"}), 404
+    return send_file(file_path, mimetype="audio/wav", as_attachment=False)
 
 
 # Backward compatibility endpoints
