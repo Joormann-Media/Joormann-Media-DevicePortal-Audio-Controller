@@ -69,21 +69,56 @@
   }
 
   function renderInputExtras(d) {
-    const hwGain = d.has_capture_gain
-      ? `<label>Hardware Gain:</label>
-         <input class="range" type="range" min="0" max="100" step="1" value="${Number.isInteger(d.capture_gain_percent) ? d.capture_gain_percent : 0}" data-action="set-capture-gain" data-id="${d.stable_id}" />
-         <span>${Number.isInteger(d.capture_gain_percent) ? d.capture_gain_percent : 0}%</span>`
+    const hwGainPercent = Number.isInteger(d.hardware_gain_percent) ? d.hardware_gain_percent : 0;
+    const hwGain = d.hardware_gain_available
+      ? `<label>${d.hardware_gain_kind === "mic_gain" ? "Mic Gain" : "Hardware Gain"}:</label>
+         <input class="range" type="range" min="0" max="100" step="1" value="${hwGainPercent}" data-action="set-hardware-gain" data-id="${d.stable_id}" />
+         <span>${hwGainPercent}%</span>
+         <span class="meta-inline">${d.hardware_gain_db !== null && d.hardware_gain_db !== undefined ? `${escapeHtml(String(d.hardware_gain_db))} dB` : ""}</span>
+         <span class="meta-inline">${Number.isInteger(d.hardware_gain_raw) ? `raw ${d.hardware_gain_raw}` : ""}${Number.isInteger(d.hardware_gain_min_raw) && Number.isInteger(d.hardware_gain_max_raw) ? ` (${d.hardware_gain_min_raw}-${d.hardware_gain_max_raw})` : ""}</span>
+         ${d.hardware_gain_switch_on === true ? '<span class="meta-inline">aktiv</span>' : d.hardware_gain_switch_on === false ? '<span class="meta-inline">inaktiv</span>' : ""}`
       : "<span>Hardware Gain: nicht verfugbar</span>";
 
+    const micBoostPercent = Number.isInteger(d.mic_boost_percent) ? d.mic_boost_percent : 0;
     const micBoost = d.mic_boost_available
       ? `<label>Mic Boost:</label>
-         <input class="range" type="range" min="0" max="100" step="1" value="${Number.isInteger(d.mic_boost_percent) ? d.mic_boost_percent : 0}" data-action="set-mic-boost" data-id="${d.stable_id}" />
-         <span>${Number.isInteger(d.mic_boost_percent) ? d.mic_boost_percent : 0}%</span>`
+         <input class="range" type="range" min="0" max="100" step="1" value="${micBoostPercent}" data-action="set-mic-boost" data-id="${d.stable_id}" />
+         <span>${micBoostPercent}%</span>
+         <span class="meta-inline">${d.mic_boost_db !== null && d.mic_boost_db !== undefined ? `${escapeHtml(String(d.mic_boost_db))} dB` : ""}</span>`
       : "<span>Mic Boost: nicht verfugbar</span>";
+
+    const extraControls = (d.alsa_controls || [])
+      .filter((c) => c && c.name && c.name !== d.hardware_gain_name && c.name !== d.mic_boost_control)
+      .map((c) => {
+        const name = escapeHtml(c.name);
+        const kind = escapeHtml(c.kind || "diagnostic_only");
+        if (c.kind === "diagnostic_only") {
+          return `<div class="meta">ALSA (diagnose): ${name} (${kind})</div>`;
+        }
+        if (c.has_volume) {
+          const p = Number.isInteger(c.percent) ? c.percent : 0;
+          return `<div class="actions">
+              <label>${name}:</label>
+              <input class="range" type="range" min="0" max="100" step="1" value="${p}" data-action="set-alsa-control" data-id="${d.stable_id}" data-control="${name}" />
+              <span>${p}%</span>
+              <span class="meta-inline">${c.db !== null && c.db !== undefined ? `${escapeHtml(String(c.db))} dB` : ""}</span>
+            </div>`;
+        }
+        if (c.has_switch) {
+          return `<div class="actions">
+              <label>${name}:</label>
+              <button data-action="set-alsa-switch" data-id="${d.stable_id}" data-control="${name}" data-switch="${c.switch_on ? "0" : "1"}">${c.switch_on ? "Deaktivieren" : "Aktivieren"}</button>
+              <span>${c.switch_on ? "aktiv" : "inaktiv"}</span>
+            </div>`;
+        }
+        return `<div class="meta">ALSA: ${name} (${kind})</div>`;
+      })
+      .join("");
 
     return `
       <div class="actions">${hwGain}</div>
       <div class="actions">${micBoost}<button data-action="test-record" data-id="${d.stable_id}">Testaufnahme</button></div>
+      ${extraControls}
       <div class="meta" data-test-result="${d.stable_id}">Letzte Testaufnahme: -</div>
       <audio controls class="hidden" data-audio-player="${d.stable_id}"></audio>
     `;
@@ -215,9 +250,23 @@
         await postJson(`/api/audio/device/${target.getAttribute("data-id")}/set-capture-gain`, {
           value_percent: Number(target.value),
         });
+      } else if (action === "set-hardware-gain") {
+        await postJson(`/api/audio/device/${target.getAttribute("data-id")}/set-hardware-gain`, {
+          value_percent: Number(target.value),
+        });
       } else if (action === "set-mic-boost") {
         await postJson(`/api/audio/device/${target.getAttribute("data-id")}/set-mic-boost`, {
           value_percent: Number(target.value),
+        });
+      } else if (action === "set-alsa-control") {
+        await postJson(`/api/audio/device/${target.getAttribute("data-id")}/set-alsa-control`, {
+          control_name: target.getAttribute("data-control"),
+          value_percent: Number(target.value),
+        });
+      } else if (action === "set-alsa-switch") {
+        await postJson(`/api/audio/device/${target.getAttribute("data-id")}/set-alsa-switch`, {
+          control_name: target.getAttribute("data-control"),
+          switch_on: target.getAttribute("data-switch") === "1",
         });
       } else if (action === "stream-volume") {
         await postJson(`/api/audio/stream/${target.getAttribute("data-stream")}/set-volume`, {
@@ -253,6 +302,8 @@
         action === "set-output-volume" ||
         action === "set-input-volume" ||
         action === "set-capture-gain" ||
+        action === "set-hardware-gain" ||
+        action === "set-alsa-control" ||
         action === "set-mic-boost" ||
         action === "stream-volume"
       ) {

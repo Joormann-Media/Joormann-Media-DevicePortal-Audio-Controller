@@ -92,6 +92,16 @@ class AudioService:
         snapshot = self.build_snapshot(include_diagnostics=False)
         return snapshot["device_lookup"].get(stable_id)
 
+    def _lookup_allowed_alsa_control(self, device: Dict[str, Any], control_name: str) -> Dict[str, Any] | None:
+        needle = (control_name or "").strip().lower()
+        if needle == "":
+            return None
+        for control in device.get("alsa_controls", []) or []:
+            name = str(control.get("name", "")).strip()
+            if name.lower() == needle:
+                return control
+        return None
+
     def set_device_default(self, stable_id: str) -> Dict[str, Any]:
         device = self._lookup_device(stable_id)
         if not device:
@@ -141,17 +151,88 @@ class AudioService:
         device = self._lookup_device(stable_id)
         if not device:
             return {"ok": False, "error": "unknown device stable_id"}
-        control = device.get("capture_gain_control", "")
-        ok, msg = self.control.set_input_hw_gain(device, value_percent, control)
-        return {"ok": ok, "error": "" if ok else msg}
+        return self.set_hardware_gain(stable_id, value_percent=value_percent)
 
     def set_mic_boost(self, stable_id: str, value_percent: int) -> Dict[str, Any]:
         device = self._lookup_device(stable_id)
         if not device:
             return {"ok": False, "error": "unknown device stable_id"}
         control = device.get("mic_boost_control", "")
-        ok, msg = self.control.set_input_hw_gain(device, value_percent, control)
-        return {"ok": ok, "error": "" if ok else msg}
+        if not control:
+            return {"ok": False, "error": "mic boost not available"}
+        return self.set_alsa_control(stable_id, control_name=control, value_percent=value_percent)
+
+    def set_hardware_gain(self, stable_id: str, *, value_percent: int | None = None, raw_value: int | None = None) -> Dict[str, Any]:
+        device = self._lookup_device(stable_id)
+        if not device:
+            return {"ok": False, "error": "unknown device stable_id"}
+        if device.get("device_class") != "input_device":
+            return {"ok": False, "error": "not an input device"}
+
+        control_name = str(device.get("hardware_gain_name", "") or device.get("capture_gain_control", "")).strip()
+        if not control_name:
+            return {"ok": False, "error": "hardware gain not available"}
+        return self.set_alsa_control(stable_id, control_name, value_percent=value_percent, raw_value=raw_value)
+
+    def set_alsa_control(
+        self,
+        stable_id: str,
+        control_name: str,
+        *,
+        value_percent: int | None = None,
+        raw_value: int | None = None,
+    ) -> Dict[str, Any]:
+        device = self._lookup_device(stable_id)
+        if not device:
+            return {"ok": False, "error": "unknown device stable_id"}
+        if device.get("device_class") != "input_device":
+            return {"ok": False, "error": "not an input device"}
+
+        control = self._lookup_allowed_alsa_control(device, control_name)
+        if not control:
+            return {"ok": False, "error": "control not allowed for device"}
+        if not bool(control.get("available", False)):
+            return {"ok": False, "error": "control unavailable"}
+        if not bool(control.get("has_volume", False)):
+            return {"ok": False, "error": "control has no volume"}
+
+        min_raw = control.get("min_raw")
+        max_raw = control.get("max_raw")
+        ok, msg = self.control.set_alsa_control_value(
+            device,
+            str(control.get("name", control_name)),
+            value_percent=value_percent,
+            raw_value=raw_value,
+            min_raw=int(min_raw) if isinstance(min_raw, int) else None,
+            max_raw=int(max_raw) if isinstance(max_raw, int) else None,
+        )
+        if not ok:
+            return {"ok": False, "error": msg}
+
+        state = self.control.get_alsa_control_state(device, str(control.get("name", control_name)))
+        return {"ok": True, "error": "", "control": state}
+
+    def set_alsa_switch(self, stable_id: str, control_name: str, switch_on: bool) -> Dict[str, Any]:
+        device = self._lookup_device(stable_id)
+        if not device:
+            return {"ok": False, "error": "unknown device stable_id"}
+        if device.get("device_class") != "input_device":
+            return {"ok": False, "error": "not an input device"}
+
+        control = self._lookup_allowed_alsa_control(device, control_name)
+        if not control:
+            return {"ok": False, "error": "control not allowed for device"}
+        if not bool(control.get("available", False)):
+            return {"ok": False, "error": "control unavailable"}
+        if not bool(control.get("has_switch", False)):
+            return {"ok": False, "error": "control has no switch"}
+
+        ok, msg = self.control.set_alsa_switch(device, str(control.get("name", control_name)), bool(switch_on))
+        if not ok:
+            return {"ok": False, "error": msg}
+
+        state = self.control.get_alsa_control_state(device, str(control.get("name", control_name)))
+        return {"ok": True, "error": "", "control": state}
 
     def test_record_input(self, stable_id: str, duration_sec: float) -> Dict[str, Any]:
         device = self._lookup_device(stable_id)

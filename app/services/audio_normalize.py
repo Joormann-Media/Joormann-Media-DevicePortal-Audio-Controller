@@ -130,6 +130,18 @@ def _match_alsa_card(card_name: str, alsa_hw: List[Dict[str, Any]]) -> Tuple[int
     return None, None, False
 
 
+def _resolve_card_index(props: Dict[str, str], card_name: str, alsa_hw: List[Dict[str, Any]]) -> Tuple[int | None, int | None, bool]:
+    for key in ["alsa.card", "alsa.card_index", "device.card"]:
+        raw = str(props.get(key, "")).strip()
+        if raw.isdigit():
+            card_idx = int(raw)
+            for row in alsa_hw:
+                if int(row.get("card_index", -1)) == card_idx:
+                    return card_idx, row.get("device_index"), True
+            return card_idx, None, True
+    return _match_alsa_card(card_name, alsa_hw)
+
+
 def _parse_mute(value: str) -> bool:
     v = (value or "").strip().lower()
     return v in {"yes", "ja", "true", "on"}
@@ -197,22 +209,22 @@ def _parse_flags(raw_flags: str) -> Tuple[bool, bool]:
 def _choose_amixer_controls(card_idx: int | None, amixer_per_card: Dict[str, Any]) -> Dict[str, Any]:
     if card_idx is None:
         return {
-            "capture_gain": None,
+            "hardware_gain": None,
             "mic_boost": None,
             "controls": [],
         }
     card = amixer_per_card.get(str(card_idx), {})
     controls = card.get("parsed_controls", [])
-    capture = None
+    hardware_gain = None
     boost = None
     for c in controls:
         kind = c.get("kind")
-        if kind == "capture_gain" and capture is None:
-            capture = c
+        if kind in {"mic_gain", "input_gain", "capture_gain"} and bool(c.get("has_volume")) and hardware_gain is None:
+            hardware_gain = c
         if kind == "mic_boost" and boost is None:
             boost = c
     return {
-        "capture_gain": capture,
+        "hardware_gain": hardware_gain,
         "mic_boost": boost,
         "controls": controls,
     }
@@ -285,7 +297,7 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
         looks_plugin = _looks_like_plugin(tech_name, desc)
         bus = _bus_type(tech_name, desc, props)
         card_name = props.get("alsa.card_name", props.get("device.product.name", ""))
-        card_idx, dev_idx, hw_present = _match_alsa_card(card_name, parsed["alsa_playback_hw"])
+        card_idx, dev_idx, hw_present = _resolve_card_index(props, card_name, parsed["alsa_playback_hw"])
         state = _parse_state(sink.get("state", "") or short_sink.get("state", ""))
 
         current_vol = _parse_volume_payload(sink.get("volume", "") or probe.get("volume", ""))
@@ -350,7 +362,7 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
         looks_plugin = _looks_like_plugin(tech_name, desc)
         bus = _bus_type(tech_name, desc, props)
         card_name = props.get("alsa.card_name", props.get("device.product.name", ""))
-        card_idx, dev_idx, hw_present = _match_alsa_card(card_name, parsed["alsa_capture_hw"])
+        card_idx, dev_idx, hw_present = _resolve_card_index(props, card_name, parsed["alsa_capture_hw"])
         state = _parse_state(source.get("state", "") or short_source.get("state", ""))
         has_hw_volume, has_hw_mute = _parse_flags(source.get("flags", ""))
         source_vol = _parse_volume_payload(source.get("volume", "") or probe.get("volume", ""))
@@ -368,11 +380,11 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
             tech_name,
             source_vol,
             base_vol,
-            mixer["capture_gain"],
+            mixer["hardware_gain"],
             mixer["mic_boost"],
         )
 
-        capture_gain = mixer["capture_gain"]
+        hardware_gain = mixer["hardware_gain"]
         mic_boost = mixer["mic_boost"]
 
         device = AudioDevice(
@@ -405,16 +417,34 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
             base_volume_db=base_vol["db"],
             has_hw_volume=has_hw_volume,
             has_hw_mute=has_hw_mute,
-            has_capture_gain=bool(capture_gain),
-            capture_gain_percent=(capture_gain or {}).get("percent"),
-            capture_gain_db=(capture_gain or {}).get("db"),
-            capture_gain_control=(capture_gain or {}).get("name", ""),
+            has_capture_gain=bool(hardware_gain),
+            capture_gain_percent=(hardware_gain or {}).get("percent"),
+            capture_gain_db=(hardware_gain or {}).get("db"),
+            capture_gain_control=(hardware_gain or {}).get("name", ""),
+            capture_gain_raw=(hardware_gain or {}).get("raw_value"),
+            capture_gain_min_raw=(hardware_gain or {}).get("min_raw"),
+            capture_gain_max_raw=(hardware_gain or {}).get("max_raw"),
+            capture_gain_switch_on=(hardware_gain or {}).get("switch_on"),
+            hardware_gain_available=bool(hardware_gain),
+            hardware_gain_name=(hardware_gain or {}).get("name", ""),
+            hardware_gain_kind=(hardware_gain or {}).get("kind", ""),
+            hardware_gain_percent=(hardware_gain or {}).get("percent"),
+            hardware_gain_db=(hardware_gain or {}).get("db"),
+            hardware_gain_raw=(hardware_gain or {}).get("raw_value"),
+            hardware_gain_min_raw=(hardware_gain or {}).get("min_raw"),
+            hardware_gain_max_raw=(hardware_gain or {}).get("max_raw"),
+            hardware_gain_switch_on=(hardware_gain or {}).get("switch_on"),
             mic_boost_available=bool(mic_boost),
             mic_boost_percent=(mic_boost or {}).get("percent"),
             mic_boost_db=(mic_boost or {}).get("db"),
             mic_boost_control=(mic_boost or {}).get("name", ""),
+            mic_boost_raw=(mic_boost or {}).get("raw_value"),
+            mic_boost_min_raw=(mic_boost or {}).get("min_raw"),
+            mic_boost_max_raw=(mic_boost or {}).get("max_raw"),
+            mic_boost_switch_on=(mic_boost or {}).get("switch_on"),
             channel_volumes=source_vol["channels"],
             hw_controls=mixer["controls"],
+            alsa_controls=mixer["controls"],
             volume_percent=source_vol["percent"],
         )
 

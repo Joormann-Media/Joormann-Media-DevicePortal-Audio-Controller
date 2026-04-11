@@ -49,15 +49,34 @@ class AudioDevice:
     capture_gain_percent: int | None = None
     capture_gain_db: float | None = None
     capture_gain_control: str = ""
+    capture_gain_raw: int | None = None
+    capture_gain_min_raw: int | None = None
+    capture_gain_max_raw: int | None = None
+    capture_gain_switch_on: bool | None = None
+
+    hardware_gain_available: bool = False
+    hardware_gain_name: str = ""
+    hardware_gain_kind: str = ""
+    hardware_gain_percent: int | None = None
+    hardware_gain_db: float | None = None
+    hardware_gain_raw: int | None = None
+    hardware_gain_min_raw: int | None = None
+    hardware_gain_max_raw: int | None = None
+    hardware_gain_switch_on: bool | None = None
 
     mic_boost_available: bool = False
     mic_boost_percent: int | None = None
     mic_boost_db: float | None = None
     mic_boost_control: str = ""
+    mic_boost_raw: int | None = None
+    mic_boost_min_raw: int | None = None
+    mic_boost_max_raw: int | None = None
+    mic_boost_switch_on: bool | None = None
 
     channel_volumes: List[Dict[str, Any]] = field(default_factory=list)
     diagnostic_flags: List[str] = field(default_factory=list)
     hw_controls: List[Dict[str, Any]] = field(default_factory=list)
+    alsa_controls: List[Dict[str, Any]] = field(default_factory=list)
 
     # Meter fields (filled by API meter endpoint / live updates)
     rms_percent: int | None = None

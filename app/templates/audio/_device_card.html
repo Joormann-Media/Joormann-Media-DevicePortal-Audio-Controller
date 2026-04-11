@@ -34,10 +34,13 @@
     <div class="meta">Aktuell: {{ device.source_volume_percent_current if device.source_volume_percent_current is not none else '-' }}% {% if device.source_volume_db_current is not none %}/ {{ device.source_volume_db_current }} dB{% endif %}</div>
 
     <div class="actions">
-      {% if device.has_capture_gain %}
-        <label>Hardware Gain:</label>
-        <input class="range" type="range" min="0" max="100" step="1" value="{{ device.capture_gain_percent if device.capture_gain_percent is not none else 0 }}" data-action="set-capture-gain" data-id="{{ device.stable_id }}" />
-        <span>{{ device.capture_gain_percent if device.capture_gain_percent is not none else 0 }}%</span>
+      {% if device.hardware_gain_available %}
+        <label>{% if device.hardware_gain_kind == 'mic_gain' %}Mic Gain{% else %}Hardware Gain{% endif %}:</label>
+        <input class="range" type="range" min="0" max="100" step="1" value="{{ device.hardware_gain_percent if device.hardware_gain_percent is not none else 0 }}" data-action="set-hardware-gain" data-id="{{ device.stable_id }}" />
+        <span>{{ device.hardware_gain_percent if device.hardware_gain_percent is not none else 0 }}%</span>
+        {% if device.hardware_gain_db is not none %}<span class="meta-inline">{{ device.hardware_gain_db }} dB</span>{% endif %}
+        {% if device.hardware_gain_raw is not none %}<span class="meta-inline">raw {{ device.hardware_gain_raw }}{% if device.hardware_gain_min_raw is not none and device.hardware_gain_max_raw is not none %} ({{ device.hardware_gain_min_raw }}-{{ device.hardware_gain_max_raw }}){% endif %}</span>{% endif %}
+        {% if device.hardware_gain_switch_on is not none %}<span class="meta-inline">{% if device.hardware_gain_switch_on %}aktiv{% else %}inaktiv{% endif %}</span>{% endif %}
       {% else %}
         <span>Hardware Gain: nicht verfugbar</span>
       {% endif %}
@@ -48,11 +51,32 @@
         <label>Mic Boost:</label>
         <input class="range" type="range" min="0" max="100" step="1" value="{{ device.mic_boost_percent if device.mic_boost_percent is not none else 0 }}" data-action="set-mic-boost" data-id="{{ device.stable_id }}" />
         <span>{{ device.mic_boost_percent if device.mic_boost_percent is not none else 0 }}%</span>
+        {% if device.mic_boost_db is not none %}<span class="meta-inline">{{ device.mic_boost_db }} dB</span>{% endif %}
       {% else %}
         <span>Mic Boost: nicht verfugbar</span>
       {% endif %}
       <button data-action="test-record" data-id="{{ device.stable_id }}">Testaufnahme</button>
     </div>
+    {% for c in device.alsa_controls or [] %}
+      {% if c.name != device.hardware_gain_name and c.name != device.mic_boost_control %}
+        {% if c.kind == 'diagnostic_only' %}
+          <div class="meta">ALSA (diagnose): {{ c.name }} ({{ c.kind }})</div>
+        {% elif c.has_volume %}
+          <div class="actions">
+            <label>{{ c.name }}:</label>
+            <input class="range" type="range" min="0" max="100" step="1" value="{{ c.percent if c.percent is not none else 0 }}" data-action="set-alsa-control" data-id="{{ device.stable_id }}" data-control="{{ c.name }}" />
+            <span>{{ c.percent if c.percent is not none else 0 }}%</span>
+            {% if c.db is not none %}<span class="meta-inline">{{ c.db }} dB</span>{% endif %}
+          </div>
+        {% elif c.has_switch %}
+          <div class="actions">
+            <label>{{ c.name }}:</label>
+            <button data-action="set-alsa-switch" data-id="{{ device.stable_id }}" data-control="{{ c.name }}" data-switch="{% if c.switch_on %}0{% else %}1{% endif %}">{% if c.switch_on %}Deaktivieren{% else %}Aktivieren{% endif %}</button>
+            <span>{% if c.switch_on %}aktiv{% else %}inaktiv{% endif %}</span>
+          </div>
+        {% endif %}
+      {% endif %}
+    {% endfor %}
     <div class="meta" data-test-result="{{ device.stable_id }}">Letzte Testaufnahme: -</div>
     <audio controls class="hidden" data-audio-player="{{ device.stable_id }}"></audio>
   {% endif %}

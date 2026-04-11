@@ -56,6 +56,9 @@ UI:
 - `POST /api/audio/device/<stable_id>/set-input-mute` body `{ "mute": false }`
 - `POST /api/audio/device/<stable_id>/set-capture-gain` body `{ "value_percent": 65 }`
 - `POST /api/audio/device/<stable_id>/set-mic-boost` body `{ "value_percent": 20 }`
+- `POST /api/audio/device/<stable_id>/set-hardware-gain` body `{ "value_percent": 65 }` oder `{ "raw_value": 12 }`
+- `POST /api/audio/device/<stable_id>/set-alsa-control` body `{ "control_name": "Mic", "value_percent": 75 }`
+- `POST /api/audio/device/<stable_id>/set-alsa-switch` body `{ "control_name": "Mic", "switch_on": true }`
 - `POST /api/audio/device/<stable_id>/test-record` body `{ "duration_sec": 3 }`
 - `GET  /api/audio/device/<stable_id>/test-record/latest.wav`
 

@@ -86,6 +86,13 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .badge.state-idle { border-color: #dfd2aa; background: #fff5d8; color: var(--warn); }
 .badge.state-suspended, .badge.state-unavailable { border-color: #e9c2c2; background: #fff1f1; color: var(--bad); }
 .meta { margin-top: 0.45rem; color: var(--muted); font-size: 0.85rem; }
+.meta-inline {
+  color: var(--muted);
+  font-size: 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.08rem 0.4rem;
+}
 .actions {
   display: flex;
   gap: 0.45rem;

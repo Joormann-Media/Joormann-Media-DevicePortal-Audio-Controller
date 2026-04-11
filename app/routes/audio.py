@@ -143,6 +143,55 @@ def api_set_mic_boost(stable_id: str):
     return jsonify(result), code
 
 
+@audio_bp.post("/api/audio/device/<stable_id>/set-hardware-gain")
+def api_set_hardware_gain(stable_id: str):
+    body = request.get_json(silent=True) or {}
+    value_percent = body.get("value_percent")
+    raw_value = body.get("raw_value")
+    if value_percent is None and raw_value is None:
+        return jsonify({"ok": False, "error": "value_percent or raw_value required"}), 400
+    result = audio_service.set_hardware_gain(
+        stable_id,
+        value_percent=int(value_percent) if value_percent is not None else None,
+        raw_value=int(raw_value) if raw_value is not None else None,
+    )
+    code = 200 if result["ok"] else 400
+    return jsonify(result), code
+
+
+@audio_bp.post("/api/audio/device/<stable_id>/set-alsa-control")
+def api_set_alsa_control(stable_id: str):
+    body = request.get_json(silent=True) or {}
+    control_name = str(body.get("control_name", "")).strip()
+    value_percent = body.get("value_percent")
+    raw_value = body.get("raw_value")
+    if control_name == "":
+        return jsonify({"ok": False, "error": "control_name required"}), 400
+    if value_percent is None and raw_value is None:
+        return jsonify({"ok": False, "error": "value_percent or raw_value required"}), 400
+    result = audio_service.set_alsa_control(
+        stable_id,
+        control_name,
+        value_percent=int(value_percent) if value_percent is not None else None,
+        raw_value=int(raw_value) if raw_value is not None else None,
+    )
+    code = 200 if result["ok"] else 400
+    return jsonify(result), code
+
+
+@audio_bp.post("/api/audio/device/<stable_id>/set-alsa-switch")
+def api_set_alsa_switch(stable_id: str):
+    body = request.get_json(silent=True) or {}
+    control_name = str(body.get("control_name", "")).strip()
+    if control_name == "":
+        return jsonify({"ok": False, "error": "control_name required"}), 400
+    if "switch_on" not in body:
+        return jsonify({"ok": False, "error": "switch_on required"}), 400
+    result = audio_service.set_alsa_switch(stable_id, control_name, bool(body["switch_on"]))
+    code = 200 if result["ok"] else 400
+    return jsonify(result), code
+
+
 @audio_bp.post("/api/audio/device/<stable_id>/test-record")
 def api_test_record(stable_id: str):
     body = request.get_json(silent=True) or {}
