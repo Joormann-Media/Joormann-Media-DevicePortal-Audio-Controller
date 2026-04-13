@@ -577,68 +577,200 @@ class BluetoothService:
 
         return sorted(devices, key=_sort_key)
 
+    def _pair_interactive(self, mac: str) -> str:
+        """
+        Vollständig interaktiver PTY-basierter Pairing-Ablauf.
+
+        Warum nicht _btctl_session?
+        'bluetoothctl pair <mac>' ist asynchron: der Prompt '[bluetooth]# '
+        erscheint sofort nach dem Start des Pairings, während das eigentliche
+        Pairing-Protokoll noch läuft.  Wenn wir den Prompt als Abbruchbedingung
+        nutzen (wie in _btctl_session), senden wir 'trust' und 'connect' zu früh
+        – die Folgebefehle landen im falschen Kontext oder als PIN-Eingabe.
+
+        Diese Methode wartet beim pair-Schritt nur auf semantische Abschluss-
+        muster ("Pairing successful", "Failed to pair", "Paired: yes") und
+        reagiert interaktiv auf PIN- und Bestätigungs-Aufforderungen.
+        """
+        master_fd, slave_fd = pty.openpty()
+        proc = subprocess.Popen(
+            ["bluetoothctl"],
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            close_fds=True,
+        )
+        os.close(slave_fd)
+
+        buf: bytes = b""
+
+        def _send(text: str) -> None:
+            os.write(master_fd, (text + "\n").encode())
+
+        def _read(t: float = 0.15) -> bytes:
+            """Einen Chunk lesen (nicht-blockierend mit Timeout)."""
+            nonlocal buf
+            r, _, _ = _select.select([master_fd], [], [], t)
+            if r:
+                try:
+                    chunk = os.read(master_fd, 4096)
+                    if chunk:
+                        buf += chunk
+                        return chunk
+                except OSError:
+                    pass
+            return b""
+
+        def _wait(
+            done_patterns: List[str],
+            timeout: float,
+            respond: Optional[Dict[str, str]] = None,
+        ) -> str:
+            """
+            Liest vom PTY, bis ein Muster aus done_patterns im neuen Output
+            erscheint oder der Timeout abläuft.
+
+            respond: {auslöser: antwort} – wenn auslöser erkannt, wird antwort
+            gesendet und weiter gelesen (einmalig pro Auslöser).
+            Gibt den neuen Output-String (seit Aufruf) zurück.
+            """
+            nonlocal buf
+            baseline    = len(buf)
+            end         = time.monotonic() + timeout
+            responded: set = set()
+
+            while time.monotonic() < end:
+                _read(0.1)
+                new = _strip_ansi(buf[baseline:].decode("utf-8", errors="replace"))
+                nl  = new.lower()
+
+                # Interaktive Antworten (z. B. PIN-Eingabe)
+                if respond:
+                    for trigger, reply in respond.items():
+                        if trigger.lower() in nl and trigger not in responded:
+                            responded.add(trigger)
+                            time.sleep(0.1)
+                            logger.info("Pairing: '%s' erkannt → sende '%s'", trigger, reply)
+                            _send(reply)
+
+                # Abbruchbedingungen prüfen
+                for p in done_patterns:
+                    if p.lower() in nl:
+                        # Nachdrainieren
+                        _read(0.2)
+                        return _strip_ansi(
+                            buf[baseline:].decode("utf-8", errors="replace")
+                        )
+
+            return _strip_ansi(buf[baseline:].decode("utf-8", errors="replace"))
+
+        PROMPT = ["[bluetooth]# "]
+
+        try:
+            _wait(PROMPT, 7)                         # Auf Startprompt warten
+
+            _send("agent off")                       # Vorhandenen Agent abmelden
+            _wait(PROMPT, 3)
+
+            _send("agent NoInputNoOutput")           # Headless-Agent anmelden
+            _wait(["agent registered", "already registered"] + PROMPT, 5)
+
+            _send("default-agent")
+            _wait(["default agent request successful"] + PROMPT, 5)
+
+            # ── Pairing ────────────────────────────────────────────────────────
+            # KEIN Prompt in done_patterns! bluetoothctl gibt '[bluetooth]# '
+            # sofort nach dem Starten des async Pairings aus – wir warten
+            # nur auf semantische Abschlussmeldungen.
+            _send(f"pair {mac}")
+            _wait(
+                done_patterns=[
+                    "Pairing successful",
+                    "Failed to pair",
+                    "Paired: yes",       # [CHG]-Event
+                ],
+                timeout=35,
+                respond={
+                    # Klassisches Bluetooth / Legacy-Pairing mit PIN
+                    "Enter PIN code":      "0000",
+                    # SSP Numeric Comparison – Bestätigung
+                    "Confirm passkey":     "yes",
+                    "Request confirmation": "yes",
+                },
+            )
+
+            _send(f"trust {mac}")
+            _wait(["trust succeeded", "trusted: yes"] + PROMPT, 7)
+
+            _send(f"connect {mac}")
+            _wait(
+                done_patterns=[
+                    "Connection successful",
+                    "Failed to connect",
+                    "Connected: yes",
+                ] + PROMPT,
+                timeout=20,
+            )
+
+            _send("quit")
+            _read(1.0)
+
+        except OSError:
+            pass
+        finally:
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+        return _strip_ansi(buf.decode("utf-8", errors="replace"))
+
     def pair_device(self, mac: str) -> Dict[str, Any]:
         """
-        Vollständiger headless Pairing-Ablauf in einer einzigen bluetoothctl-Sitzung:
-          1. agent NoInputNoOutput  – headless Pairing ohne PIN/Bestätigung
-          2. default-agent          – Agent als Standard registrieren
-          3. pair <mac>             – Pairing starten (bis 35 s Timeout)
-          4. trust <mac>            – Autoverbindung erlauben
-          5. connect <mac>          – Verbindung aufbauen
-
-        Alle Schritte müssen in derselben Sitzung laufen, da der Agent-Kontext
-        nicht über separate Prozessaufrufe hinweg erhalten bleibt.
-
-        Nach der Session wird 'bluetoothctl info <mac>' geprüft, um den echten
-        Paired-Status zu verifizieren — manche Geräte liefern kein "Pairing
-        successful" in der Ausgabe, obwohl das Pairing geklappt hat.
+        Vollständiger Pairing-Ablauf (pair → trust → connect) mit interaktivem
+        PTY, PIN-Handling und Fallback-Verifikation via 'bluetoothctl info'.
         """
         mac = mac.upper()
-        logger.info("Pairing starten (headless): %s", mac)
+        logger.info("Pairing starten: %s", mac)
 
-        output = self._btctl_session(
-            [
-                "agent NoInputNoOutput",
-                "default-agent",
-                f"pair {mac}",
-                f"trust {mac}",
-                f"connect {mac}",
-            ],
-            timeout=70,
-        )
+        output    = self._pair_interactive(mac)
+        out_lower = output.lower()
         logger.info("Pairing-Ausgabe für %s:\n%s", mac, output)
 
-        out_lower      = output.lower()
         already_paired = "already paired" in out_lower
-        pair_ok        = "pairing successful" in out_lower or already_paired
+        pair_ok        = (
+            "pairing successful" in out_lower
+            or "paired: yes"     in out_lower
+            or already_paired
+        )
 
         if not pair_ok:
-            # Fallback: aktuellen Gerätestatus per 'info' prüfen, da manche
-            # Geräte kein explizites "Pairing successful" ausgeben
+            # Fallback: Gerätestatus per 'info' prüfen — manche Geräte
+            # geben kein explizites "Pairing successful" aus
             _, info_out = self._btctl(["info", mac], timeout=6)
-            info = self._parse_info_block(_strip_ansi(info_out))
-            pair_ok = info.get("paired", False)
-            if not pair_ok:
-                return {
-                    "ok":    False,
-                    "error": f"Pairing fehlgeschlagen: {output}",
-                }
+            info        = self._parse_info_block(_strip_ansi(info_out))
+            pair_ok     = info.get("paired", False)
+
+        if not pair_ok:
+            return {"ok": False, "error": f"Pairing fehlgeschlagen: {output}"}
 
         connected = (
             "connection successful" in out_lower
-            or ("connected" in out_lower and "not connected" not in out_lower)
+            or "connected: yes"     in out_lower
         )
-        # Verbindungsstatus ebenfalls per info absichern
         if not connected:
             _, info_out2 = self._btctl(["info", mac], timeout=6)
-            info2 = self._parse_info_block(_strip_ansi(info_out2))
-            connected = info2.get("connected", False)
+            info2        = self._parse_info_block(_strip_ansi(info_out2))
+            connected    = info2.get("connected", False)
 
         return {
             "ok":        True,
             "message":   "Erfolgreich gepairt und verbunden" if connected
-                         else "Gepairt. Verbindung konnte nicht hergestellt werden — "
-                              "Gerät einschalten und erneut verbinden.",
+                         else "Gepairt — Gerät einschalten und 'Verbinden' klicken.",
             "paired":    True,
             "connected": connected,
         }
