@@ -10,7 +10,10 @@ Kein externer Python-Pip-Paket erforderlich.
 from __future__ import annotations
 
 import logging
+import os
+import pty
 import re
+import select as _select
 import subprocess
 import threading
 import time
@@ -92,31 +95,78 @@ class BluetoothService:
         """Shorthand: führt 'bluetoothctl <args>' aus."""
         return self._run(["bluetoothctl"] + args, timeout=timeout)
 
-    def _btctl_session(self, commands: List[str], timeout: int = 50) -> str:
+    def _btctl_session(self, commands: List[str], timeout: int = 55) -> str:
         """
-        Führt mehrere bluetoothctl-Befehle in einer einzigen interaktiven Sitzung
-        aus, indem alle Befehle über stdin übergeben werden.
+        Führt mehrere bluetoothctl-Befehle in einer einzigen Sitzung aus.
 
-        Notwendig für headless Pairing: Der Bluetooth-Agent (NoInputNoOutput)
-        muss in derselben Sitzung aktiv sein, bevor 'pair' aufgerufen wird.
-        Gibt die gesamte bereinigte Ausgabe zurück.
+        Verwendet ein Pseudo-Terminal (PTY) statt einer Pipe, damit bluetoothctl
+        vollständig initialisiert wird — inklusive Agent-Registrierung.
+        Ohne PTY schlägt 'agent NoInputNoOutput' mit "Failed to register agent
+        object" fehl, weil bluetoothctl erkennt, dass es nicht an einem Terminal
+        hängt, und sein internes Agent-Framework nicht aufbaut.
+
+        Sendet jeden Befehl erst, wenn der '[...]#'-Prompt in der Ausgabe erscheint,
+        um Race-Conditions zwischen bluetoothd-Verbindung und Befehlseingabe zu
+        vermeiden.
         """
-        input_data = "\n".join(commands) + "\nquit\n"
+        master_fd, slave_fd = pty.openpty()
+        proc = subprocess.Popen(
+            ["bluetoothctl"],
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            close_fds=True,
+        )
+        os.close(slave_fd)
+
+        all_output = b""
+
+        def _read_until_prompt(per_timeout: float) -> None:
+            nonlocal all_output
+            end = time.monotonic() + per_timeout
+            while time.monotonic() < end:
+                remaining = end - time.monotonic()
+                ready, _, _ = _select.select([master_fd], [], [], min(0.3, remaining))
+                if not ready:
+                    continue
+                try:
+                    chunk = os.read(master_fd, 4096)
+                except OSError:
+                    return
+                if not chunk:
+                    return
+                all_output += chunk
+                text = _strip_ansi(all_output.decode("utf-8", errors="replace"))
+                # bluetoothctl prompt ends with "# " (e.g. "[bluetooth]# ")
+                if text.rstrip().endswith("# ") or text.rstrip().endswith("#"):
+                    return
+
         try:
-            result = subprocess.run(
-                ["bluetoothctl"],
-                input=input_data,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-            return _strip_ansi((result.stdout + result.stderr).strip())
-        except subprocess.TimeoutExpired:
-            return "Zeitüberschreitung"
-        except FileNotFoundError:
-            return "bluetoothctl nicht gefunden"
-        except Exception as exc:
-            return str(exc)
+            _read_until_prompt(7)  # Warten auf initiales [bluetooth]#
+
+            for cmd in commands:
+                if proc.poll() is not None:
+                    break
+                os.write(master_fd, (cmd + "\n").encode())
+                per_t = 35.0 if ("pair" in cmd or "connect" in cmd) else 7.0
+                _read_until_prompt(per_t)
+
+            os.write(master_fd, b"quit\n")
+            _read_until_prompt(3)
+
+        except OSError:
+            pass
+        finally:
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+        return _strip_ansi(all_output.decode("utf-8", errors="replace"))
 
     def _parse_info_block(self, output: str) -> Dict[str, Any]:
         """
