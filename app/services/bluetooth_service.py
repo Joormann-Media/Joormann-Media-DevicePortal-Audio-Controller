@@ -95,19 +95,22 @@ class BluetoothService:
         """Shorthand: führt 'bluetoothctl <args>' aus."""
         return self._run(["bluetoothctl"] + args, timeout=timeout)
 
-    def _btctl_session(self, commands: List[str], timeout: int = 55) -> str:
+    def _btctl_session(self, commands: List[str], timeout: int = 60) -> str:
         """
         Führt mehrere bluetoothctl-Befehle in einer einzigen Sitzung aus.
 
         Verwendet ein Pseudo-Terminal (PTY) statt einer Pipe, damit bluetoothctl
         vollständig initialisiert wird — inklusive Agent-Registrierung.
-        Ohne PTY schlägt 'agent NoInputNoOutput' mit "Failed to register agent
-        object" fehl, weil bluetoothctl erkennt, dass es nicht an einem Terminal
-        hängt, und sein internes Agent-Framework nicht aufbaut.
 
-        Sendet jeden Befehl erst, wenn der '[...]#'-Prompt in der Ausgabe erscheint,
-        um Race-Conditions zwischen bluetoothd-Verbindung und Befehlseingabe zu
-        vermeiden.
+        Kritischer Unterschied zur Pipe-Variante: Jedes _read_until merkt sich
+        einen Baseline-Index im Puffer und wertet nur den neuen Anteil aus.
+        Ohne Baseline würde der `#`-Prompt aus einem früheren asynchronen Event
+        (z. B. "Agent registered") als Abschluss des aktuellen Befehls erkannt
+        und der nächste Befehl zu früh gesendet.
+
+        Für `pair` und `connect` wird zusätzlich auf semantische Erfolgsmuster
+        gewartet statt nur auf den Prompt, damit langsame Geräteantworten nicht
+        versehentlich abgeschnitten werden.
         """
         master_fd, slave_fd = pty.openpty()
         proc = subprocess.Popen(
@@ -121,38 +124,85 @@ class BluetoothService:
 
         all_output = b""
 
-        def _read_until_prompt(per_timeout: float) -> None:
+        def _read_until(patterns: List[str], per_timeout: float) -> str:
+            """
+            Liest vom PTY bis ein Muster in der neuen Ausgabe (seit Aufruf) auftaucht
+            oder der Timeout abläuft.  Gibt den neuen Ausgabe-String zurück.
+            """
             nonlocal all_output
+            baseline = len(all_output)
             end = time.monotonic() + per_timeout
             while time.monotonic() < end:
                 remaining = end - time.monotonic()
-                ready, _, _ = _select.select([master_fd], [], [], min(0.3, remaining))
-                if not ready:
-                    continue
-                try:
-                    chunk = os.read(master_fd, 4096)
-                except OSError:
-                    return
-                if not chunk:
-                    return
-                all_output += chunk
-                text = _strip_ansi(all_output.decode("utf-8", errors="replace"))
-                # bluetoothctl prompt ends with "# " (e.g. "[bluetooth]# ")
-                if text.rstrip().endswith("# ") or text.rstrip().endswith("#"):
-                    return
+                ready, _, _ = _select.select([master_fd], [], [], min(0.2, remaining))
+                if ready:
+                    try:
+                        chunk = os.read(master_fd, 4096)
+                        if chunk:
+                            all_output += chunk
+                    except OSError:
+                        break
+                new = _strip_ansi(all_output[baseline:].decode("utf-8", errors="replace"))
+                for p in patterns:
+                    if p.lower() in new.lower():
+                        # Kurz nachdrainieren – es könnten noch Folgezeilen kommen
+                        time.sleep(0.15)
+                        try:
+                            r2, _, _ = _select.select([master_fd], [], [], 0.15)
+                            if r2:
+                                all_output += os.read(master_fd, 4096)
+                        except OSError:
+                            pass
+                        return _strip_ansi(
+                            all_output[baseline:].decode("utf-8", errors="replace")
+                        )
+            return _strip_ansi(all_output[baseline:].decode("utf-8", errors="replace"))
+
+        # Erkennungsmuster für den Ruhezustand-Prompt "[bluetooth]# "
+        PROMPT = ["[bluetooth]# "]
 
         try:
-            _read_until_prompt(7)  # Warten auf initiales [bluetooth]#
+            # Warten auf den initialen [bluetooth]#-Prompt
+            _read_until(PROMPT + ["[bluetooth]#\n", "[bluetooth]#\r"], 7)
 
             for cmd in commands:
                 if proc.poll() is not None:
                     break
                 os.write(master_fd, (cmd + "\n").encode())
-                per_t = 35.0 if ("pair" in cmd or "connect" in cmd) else 7.0
-                _read_until_prompt(per_t)
+
+                if "pair" in cmd:
+                    # Auf explizites Ergebnis warten (nicht nur Prompt), da
+                    # bluetoothctl bei laufendem Pairing asynchrone Events ausgibt
+                    _read_until(
+                        [
+                            "Pairing successful",
+                            "Failed to pair",
+                            "already paired",
+                            "not available",
+                            "not ready",
+                        ] + PROMPT,
+                        35,
+                    )
+                elif "connect" in cmd:
+                    _read_until(
+                        [
+                            "Connection successful",
+                            "Failed to connect",
+                            "already connected",
+                        ] + PROMPT,
+                        20,
+                    )
+                elif "agent" in cmd.lower():
+                    # Agent-Registrierung ist asynchron; auf "registered" warten
+                    _read_until(
+                        ["Agent registered", "agent registered", "Failed to register"] + PROMPT,
+                        7,
+                    )
+                else:
+                    _read_until(PROMPT, 7)
 
             os.write(master_fd, b"quit\n")
-            _read_until_prompt(3)
+            _read_until(PROMPT + ["[bluetooth]#"], 3)
 
         except OSError:
             pass
@@ -532,12 +582,16 @@ class BluetoothService:
         Vollständiger headless Pairing-Ablauf in einer einzigen bluetoothctl-Sitzung:
           1. agent NoInputNoOutput  – headless Pairing ohne PIN/Bestätigung
           2. default-agent          – Agent als Standard registrieren
-          3. pair <mac>             – Pairing starten
+          3. pair <mac>             – Pairing starten (bis 35 s Timeout)
           4. trust <mac>            – Autoverbindung erlauben
           5. connect <mac>          – Verbindung aufbauen
 
         Alle Schritte müssen in derselben Sitzung laufen, da der Agent-Kontext
         nicht über separate Prozessaufrufe hinweg erhalten bleibt.
+
+        Nach der Session wird 'bluetoothctl info <mac>' geprüft, um den echten
+        Paired-Status zu verifizieren — manche Geräte liefern kein "Pairing
+        successful" in der Ausgabe, obwohl das Pairing geklappt hat.
         """
         mac = mac.upper()
         logger.info("Pairing starten (headless): %s", mac)
@@ -550,26 +604,41 @@ class BluetoothService:
                 f"trust {mac}",
                 f"connect {mac}",
             ],
-            timeout=55,
+            timeout=70,
         )
-        logger.info("Pairing-Ausgabe für %s: %s", mac, output)
+        logger.info("Pairing-Ausgabe für %s:\n%s", mac, output)
 
         out_lower      = output.lower()
         already_paired = "already paired" in out_lower
         pair_ok        = "pairing successful" in out_lower or already_paired
 
         if not pair_ok:
-            return {"ok": False, "error": f"Pairing fehlgeschlagen: {output}"}
+            # Fallback: aktuellen Gerätestatus per 'info' prüfen, da manche
+            # Geräte kein explizites "Pairing successful" ausgeben
+            _, info_out = self._btctl(["info", mac], timeout=6)
+            info = self._parse_info_block(_strip_ansi(info_out))
+            pair_ok = info.get("paired", False)
+            if not pair_ok:
+                return {
+                    "ok":    False,
+                    "error": f"Pairing fehlgeschlagen: {output}",
+                }
 
         connected = (
             "connection successful" in out_lower
             or ("connected" in out_lower and "not connected" not in out_lower)
         )
+        # Verbindungsstatus ebenfalls per info absichern
+        if not connected:
+            _, info_out2 = self._btctl(["info", mac], timeout=6)
+            info2 = self._parse_info_block(_strip_ansi(info_out2))
+            connected = info2.get("connected", False)
 
         return {
             "ok":        True,
             "message":   "Erfolgreich gepairt und verbunden" if connected
-                         else f"Gepairt, Verbindung ausstehend: {output}",
+                         else "Gepairt. Verbindung konnte nicht hergestellt werden — "
+                              "Gerät einschalten und erneut verbinden.",
             "paired":    True,
             "connected": connected,
         }
