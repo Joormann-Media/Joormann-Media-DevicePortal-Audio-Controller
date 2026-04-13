@@ -92,6 +92,32 @@ class BluetoothService:
         """Shorthand: führt 'bluetoothctl <args>' aus."""
         return self._run(["bluetoothctl"] + args, timeout=timeout)
 
+    def _btctl_session(self, commands: List[str], timeout: int = 50) -> str:
+        """
+        Führt mehrere bluetoothctl-Befehle in einer einzigen interaktiven Sitzung
+        aus, indem alle Befehle über stdin übergeben werden.
+
+        Notwendig für headless Pairing: Der Bluetooth-Agent (NoInputNoOutput)
+        muss in derselben Sitzung aktiv sein, bevor 'pair' aufgerufen wird.
+        Gibt die gesamte bereinigte Ausgabe zurück.
+        """
+        input_data = "\n".join(commands) + "\nquit\n"
+        try:
+            result = subprocess.run(
+                ["bluetoothctl"],
+                input=input_data,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            return _strip_ansi((result.stdout + result.stderr).strip())
+        except subprocess.TimeoutExpired:
+            return "Zeitüberschreitung"
+        except FileNotFoundError:
+            return "bluetoothctl nicht gefunden"
+        except Exception as exc:
+            return str(exc)
+
     def _parse_info_block(self, output: str) -> Dict[str, Any]:
         """
         Parst die Ausgabe von 'bluetoothctl info <mac>' in ein Dict.
@@ -453,39 +479,49 @@ class BluetoothService:
 
     def pair_device(self, mac: str) -> Dict[str, Any]:
         """
-        Vollständiger Pairing-Ablauf:
-          1. pair <mac>
-          2. trust <mac>   (Autoverbindung erlauben)
-          3. connect <mac>
+        Vollständiger headless Pairing-Ablauf in einer einzigen bluetoothctl-Sitzung:
+          1. agent NoInputNoOutput  – headless Pairing ohne PIN/Bestätigung
+          2. default-agent          – Agent als Standard registrieren
+          3. pair <mac>             – Pairing starten
+          4. trust <mac>            – Autoverbindung erlauben
+          5. connect <mac>          – Verbindung aufbauen
+
+        Alle Schritte müssen in derselben Sitzung laufen, da der Agent-Kontext
+        nicht über separate Prozessaufrufe hinweg erhalten bleibt.
         """
         mac = mac.upper()
-        logger.info("Pairing starten: %s", mac)
+        logger.info("Pairing starten (headless): %s", mac)
 
-        ok_pair, out_pair = self._btctl(["pair", mac], timeout=30)
-        already_paired    = "already paired" in out_pair.lower()
+        output = self._btctl_session(
+            [
+                "agent NoInputNoOutput",
+                "default-agent",
+                f"pair {mac}",
+                f"trust {mac}",
+                f"connect {mac}",
+            ],
+            timeout=55,
+        )
+        logger.info("Pairing-Ausgabe für %s: %s", mac, output)
 
-        if not ok_pair and not already_paired:
-            logger.warning("Pairing fehlgeschlagen für %s: %s", mac, out_pair)
-            return {"ok": False, "error": f"Pairing fehlgeschlagen: {out_pair}"}
+        out_lower      = output.lower()
+        already_paired = "already paired" in out_lower
+        pair_ok        = "pairing successful" in out_lower or already_paired
 
-        self._btctl(["trust", mac], timeout=5)
+        if not pair_ok:
+            return {"ok": False, "error": f"Pairing fehlgeschlagen: {output}"}
 
-        ok_conn, out_conn = self._btctl(["connect", mac], timeout=15)
-        connected         = ok_conn or "successful" in out_conn.lower()
-
-        if not connected:
-            return {
-                "ok":      True,
-                "message": f"Gepairt. Verbindungsversuch: {out_conn}",
-                "paired":  True,
-                "connected": False,
-            }
+        connected = (
+            "connection successful" in out_lower
+            or ("connected" in out_lower and "not connected" not in out_lower)
+        )
 
         return {
             "ok":        True,
-            "message":   "Erfolgreich gepairt und verbunden",
+            "message":   "Erfolgreich gepairt und verbunden" if connected
+                         else f"Gepairt, Verbindung ausstehend: {output}",
             "paired":    True,
-            "connected": True,
+            "connected": connected,
         }
 
     def trust_device(self, mac: str, trust: bool = True) -> Dict[str, Any]:
