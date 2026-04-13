@@ -488,6 +488,13 @@ class BluetoothService:
             "connected": True,
         }
 
+    def trust_device(self, mac: str, trust: bool = True) -> Dict[str, Any]:
+        """Markiert ein Gerät als vertrauenswürdig (oder hebt es auf)."""
+        mac = mac.upper()
+        cmd = "trust" if trust else "untrust"
+        ok, out = self._btctl([cmd, mac], timeout=5)
+        return {"ok": ok, "trusted": trust, "message": out}
+
     def connect_device(self, mac: str) -> Dict[str, Any]:
         """Verbindet ein bereits bekanntes Gerät."""
         mac = mac.upper()

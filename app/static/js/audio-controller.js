@@ -540,6 +540,11 @@
       } else {
         actions += `<button data-btaction="connect" data-mac="${safeMac}" class="primary">Verbinden</button>`;
       }
+      if (!dev.trusted) {
+        actions += `<button data-btaction="trust" data-mac="${safeMac}">Vertrauen</button>`;
+      } else {
+        actions += `<button data-btaction="untrust" data-mac="${safeMac}" class="muted-btn">Vertrauen entziehen</button>`;
+      }
       actions += `<button data-btaction="remove" data-mac="${safeMac}">Entfernen</button>`;
     }
 
@@ -626,6 +631,8 @@
       pair:       { url: `/api/bluetooth/device/${urlMac}/pair`,       method: "POST" },
       connect:    { url: `/api/bluetooth/device/${urlMac}/connect`,    method: "POST" },
       disconnect: { url: `/api/bluetooth/device/${urlMac}/disconnect`, method: "POST" },
+      trust:      { url: `/api/bluetooth/device/${urlMac}/trust`,      method: "POST", body: { trust: true } },
+      untrust:    { url: `/api/bluetooth/device/${urlMac}/trust`,      method: "POST", body: { trust: false } },
       remove:     { url: `/api/bluetooth/device/${urlMac}`,            method: "DELETE" },
     }[action];
     if (!cfg) return;
@@ -634,15 +641,16 @@
     if (btn) { btn.disabled = true; btn.textContent = "\u2026"; }
 
     try {
-      const res  = await fetch(cfg.url, { method: cfg.method, headers: { Accept: "application/json", "Content-Type": "application/json" }, body: cfg.method !== "DELETE" ? JSON.stringify({}) : undefined });
+      const reqBody = cfg.method !== "DELETE" ? JSON.stringify(cfg.body ?? {}) : undefined;
+      const res  = await fetch(cfg.url, { method: cfg.method, headers: { Accept: "application/json", "Content-Type": "application/json" }, body: reqBody });
       const data = await res.json().catch(() => ({}));
       if (!data.ok && res.status !== 200) {
         btSetStatus(`Fehler: ${data.error || data.message || "Unbekannt"}`, "error");
         if (btn) { btn.disabled = false; btn.textContent = action; }
       } else {
-        const labels = { pair: "Gepairt", connect: "Verbunden", disconnect: "Getrennt", remove: "Entfernt" };
+        const labels = { pair: "Gepairt", connect: "Verbunden", disconnect: "Getrennt", trust: "Als vertrauenswürdig markiert", untrust: "Vertrauen entzogen", remove: "Entfernt" };
         btSetStatus(`${labels[action] || "OK"}: ${mac}`, "ok");
-        await btLoadKnown();
+        await Promise.all([btLoadKnown(), btLoadInline()]);
         const scanData = await getJson("/api/bluetooth/scan/results");
         btRenderFoundDevices(scanData.devices || []);
         if (action === "pair" || action === "connect" || action === "disconnect") {
@@ -672,11 +680,36 @@
     btStopScanPolling();
   }
 
+  async function btLoadInline() {
+    const list = qs("#bt-inline-list");
+    if (!list) return;
+    try {
+      const data = await getJson("/api/bluetooth/devices");
+      const devices = data.devices || [];
+      if (devices.length === 0) {
+        list.innerHTML = `<span class="meta">Keine bekannten Bluetooth-Geräte.</span>`;
+        return;
+      }
+      list.innerHTML = devices.map((d) => btDeviceItemHtml(d, "known")).join("");
+    } catch (err) {
+      list.innerHTML = `<span class="meta" style="color:var(--warn)">Geräte konnten nicht geladen werden.</span>`;
+    }
+  }
+
   function initBluetooth() {
+    btLoadInline();
+
     qs("#bt-open-btn")?.addEventListener("click", btOpenModal);
     qs("#bt-modal-close")?.addEventListener("click", btCloseModal);
     qs("#bt-modal")?.addEventListener("click", (ev) => { if (ev.target === qs("#bt-modal")) btCloseModal(); });
     document.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && !qs("#bt-modal")?.classList.contains("hidden")) btCloseModal(); });
+
+    qs("#bt-inline-list")?.addEventListener("click", (ev) => {
+      const btn = ev.target.closest("[data-btaction]");
+      if (!btn) return;
+      ev.stopPropagation();
+      btHandleAction(btn.getAttribute("data-btaction"), btn.getAttribute("data-mac"));
+    });
 
     qs("#bt-power-btn")?.addEventListener("click", async () => {
       const on = qs("#bt-power-btn")?.textContent?.includes("Einschalten");

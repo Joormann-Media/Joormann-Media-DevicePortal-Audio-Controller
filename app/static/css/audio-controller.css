@@ -150,11 +150,17 @@ pre {
   max-height: 260px;
   overflow: auto;
 }
-.hidden { display: none; }
+.hidden { display: none !important; }
 @media (max-width: 800px) {
   .topbar { flex-direction: column; align-items: flex-start; }
   .range { width: 100%; }
 }
+
+/* ── Bluetooth Inline-Liste (Hauptseite) ─────────────────────────────────── */
+.bt-inline-list { display: flex; flex-direction: column; gap: .5rem; }
+.bt-inline-list .bt-device-item { background: var(--card, #1e293b); border-radius: .5rem; }
+.muted-btn { opacity: .55; }
+.muted-btn:hover { opacity: 1; }
 
 /* ── Bluetooth-Modal ─────────────────────────────────────────────────────── */
 .bt-modal-backdrop {

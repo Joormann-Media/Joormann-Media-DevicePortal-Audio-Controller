@@ -105,6 +105,15 @@ def api_bt_pair(mac: str):
     return jsonify(res), 200 if res["ok"] else 400
 
 
+@bluetooth_bp.post("/api/bluetooth/device/<path:mac>/trust")
+def api_bt_trust(mac: str):
+    """Markiert ein gepairtes Gerät als vertrauenswürdig. Body: { "trust": true }"""
+    body  = request.get_json(silent=True) or {}
+    trust = bool(body.get("trust", True))
+    res   = _bt.trust_device(mac, trust)
+    return jsonify(res), 200 if res["ok"] else 400
+
+
 @bluetooth_bp.post("/api/bluetooth/device/<path:mac>/connect")
 def api_bt_connect(mac: str):
     """Verbindet ein bereits gepairtes Gerät."""
