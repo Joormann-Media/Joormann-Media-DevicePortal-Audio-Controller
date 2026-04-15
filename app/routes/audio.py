@@ -1,11 +1,52 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import time
+from pathlib import Path
 
 from flask import Blueprint, Response, jsonify, render_template, request, send_file
 
 from app.services.audio_service import AudioService
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _run_repo_update(mode: str) -> tuple[dict, int]:
+    script = _PROJECT_ROOT / "scripts" / "update_manager.sh"
+    if not script.exists():
+        return {"ok": False, "code": "update_script_missing", "message": f"Script fehlt: {script}"}, 500
+    timeout = 1800 if mode == "apply" else 45
+    try:
+        proc = subprocess.run(
+            ["bash", str(script), mode],
+            text=True, capture_output=True, timeout=timeout,
+        )
+    except Exception as exc:
+        return {"ok": False, "code": "update_exec_failed", "message": str(exc)}, 500
+
+    raw = (proc.stdout or "").strip()
+    payload: dict = {}
+    if raw:
+        try:
+            payload = json.loads(raw.splitlines()[-1])
+        except Exception:
+            payload = {}
+
+    if not isinstance(payload, dict) or not payload:
+        payload = {
+            "ok": proc.returncode == 0,
+            "code": "update_output_invalid",
+            "message": "Ungültige Update-Antwort",
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+        }
+    if proc.returncode != 0:
+        payload["ok"] = False
+        payload.setdefault("code", "update_failed")
+        payload.setdefault("message", "Update fehlgeschlagen")
+
+    return payload, 200 if payload.get("ok") else 500
 
 
 audio_bp = Blueprint("audio", __name__)
@@ -16,7 +57,14 @@ audio_service = AudioService()
 def audio_index():
     expert_mode = request.args.get("expert", "0") == "1"
     snapshot = audio_service.build_snapshot(include_diagnostics=expert_mode)
-    return render_template("audio/index.html", snapshot=snapshot, expert_mode=expert_mode)
+    meter_status = audio_service.meter_status()
+    return render_template(
+        "audio/index.html",
+        snapshot=snapshot,
+        expert_mode=expert_mode,
+        meter_running=meter_status["running"],
+        meter_autostart=meter_status["autostart"],
+    )
 
 
 @audio_bp.get("/api/audio/summary")
@@ -74,6 +122,31 @@ def api_diagnostics():
 @audio_bp.get("/api/audio/meters")
 def api_meters():
     return jsonify(audio_service.get_meters())
+
+
+@audio_bp.get("/api/audio/meter/status")
+def api_meter_status():
+    return jsonify(audio_service.meter_status())
+
+
+@audio_bp.post("/api/audio/meter/start")
+def api_meter_start():
+    return jsonify(audio_service.meter_start())
+
+
+@audio_bp.post("/api/audio/meter/stop")
+def api_meter_stop():
+    return jsonify(audio_service.meter_stop())
+
+
+@audio_bp.post("/api/audio/meter/autostart/enable")
+def api_meter_autostart_enable():
+    return jsonify(audio_service.meter_autostart_enable())
+
+
+@audio_bp.post("/api/audio/meter/autostart/disable")
+def api_meter_autostart_disable():
+    return jsonify(audio_service.meter_autostart_disable())
 
 
 @audio_bp.post("/api/audio/device/<stable_id>/set-default")
@@ -269,6 +342,18 @@ def api_set_stream_volume(stream_id: str):
     result = audio_service.set_stream_volume(stream_id, int(body["volume_percent"]))
     code = 200 if result["ok"] else 400
     return jsonify(result), code
+
+
+@audio_bp.get("/api/update/status")
+def api_update_status():
+    payload, status = _run_repo_update("status")
+    return jsonify(payload), status
+
+
+@audio_bp.post("/api/update/apply")
+def api_update_apply():
+    payload, status = _run_repo_update("apply")
+    return jsonify(payload), status
 
 
 @audio_bp.get("/api/audio/events")

@@ -29,9 +29,34 @@ class AudioMeterService:
         self._chunk_bytes = 3200  # 16000 Hz, s16 mono, ~100ms
         self._stale_seconds = 6.0
         self._max_sources = 6
+        self._running: bool = False
+
+    def start(self) -> None:
+        with self._lock:
+            self._running = True
+
+    def stop(self) -> None:
+        with self._lock:
+            self._running = False
+            for name in list(self._workers.keys()):
+                self._stop_worker(name)
+
+    def status(self) -> Dict[str, Any]:
+        with self._lock:
+            return {"running": self._running, "worker_count": len(self._workers)}
 
     def get_meters(self, devices: List[Dict[str, Any]]) -> Dict[str, Any]:
         with self._lock:
+            if not self._running:
+                return {
+                    device["stable_id"]: {
+                        "available": False,
+                        "reason": "meter_stopped",
+                        "rms_percent": 0,
+                        "peak_percent": 0,
+                    }
+                    for device in devices
+                }
             self._cleanup_stale_workers()
             if shutil.which("ffmpeg") is None:
                 return {

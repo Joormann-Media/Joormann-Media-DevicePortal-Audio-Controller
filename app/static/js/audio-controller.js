@@ -2,6 +2,8 @@
   const state = {
     snapshotHash: window.AUDIO_BOOTSTRAP.snapshot_hash,
     expertMode: window.AUDIO_BOOTSTRAP.expert_mode,
+    meterRunning: window.AUDIO_BOOTSTRAP.meter_running,
+    meterAutostart: window.AUDIO_BOOTSTRAP.meter_autostart,
   };
 
   async function getJson(url) {
@@ -20,14 +22,42 @@
     if (!bar || !text) return;
     if (!value || !value.available) {
       bar.style.width = "0%";
-      text.textContent = "Pegel nicht verfügbar";
+      if (value && value.reason === "meter_stopped") {
+        text.textContent = "Meter nicht aktiv";
+      } else {
+        text.textContent = "Pegel nicht verfügbar";
+      }
       return;
     }
     bar.style.width = `${value.peak_percent}%`;
     text.textContent = `RMS ${value.rms_percent}% | Peak ${value.peak_percent}%`;
   }
 
+  function updateMeterBtn(running) {
+    state.meterRunning = running;
+    const btn = qs("#meter-toggle");
+    if (!btn) return;
+    if (running) {
+      btn.textContent = "🎚 Pegel-Meter stoppen";
+      btn.classList.remove("meter-inactive");
+      btn.classList.add("meter-active");
+    } else {
+      btn.textContent = "🎚 Pegel-Meter starten";
+      btn.classList.remove("meter-active");
+      btn.classList.add("meter-inactive");
+    }
+  }
+
+  function updateAutostartBadge(enabled) {
+    state.meterAutostart = enabled;
+    const badge = qs("#autostart-badge");
+    if (!badge) return;
+    badge.textContent = enabled ? "an" : "aus";
+    badge.className = enabled ? "badge badge-on" : "badge badge-off";
+  }
+
   async function refreshMeters() {
+    if (!state.meterRunning) return;
     try {
       const data = await getJson("/api/audio/meters");
       Object.entries(data.meters || {}).forEach(([stableId, meter]) => meterBar(stableId, meter));
@@ -369,6 +399,29 @@
       const url = new URL(window.location.href);
       url.searchParams.set("expert", state.expertMode ? "0" : "1");
       window.location.href = url.toString();
+    });
+
+    qs("#meter-toggle")?.addEventListener("click", async () => {
+      const btn = qs("#meter-toggle");
+      btn.disabled = true;
+      try {
+        const endpoint = state.meterRunning ? "/api/audio/meter/stop" : "/api/audio/meter/start";
+        const res = await fetch(endpoint, { method: "POST", cache: "no-store" });
+        const data = await res.json();
+        updateMeterBtn(data.running);
+        if (!data.running) {
+          document.querySelectorAll("[data-meter-text]").forEach((el) => {
+            el.textContent = "Meter nicht aktiv";
+          });
+          document.querySelectorAll("[data-meter]").forEach((el) => {
+            el.style.width = "0%";
+          });
+        }
+      } catch (_err) {
+        qs("#status").textContent = "Meter-Fehler";
+      } finally {
+        btn.disabled = false;
+      }
     });
   }
 

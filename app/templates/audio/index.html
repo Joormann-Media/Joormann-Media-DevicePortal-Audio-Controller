@@ -17,6 +17,12 @@
           <button id="refresh-btn" class="primary">Aktualisieren</button>
           <button id="bt-open-btn" class="bt-open-btn">&#x1F4F6; Bluetooth</button>
           <button id="expert-toggle">{% if expert_mode %}Expertenmodus aus{% else %}Expertenmodus an{% endif %}</button>
+          <button id="meter-toggle" class="{% if meter_running %}meter-active{% else %}meter-inactive{% endif %}">
+            &#x1F39A; {% if meter_running %}Pegel-Meter stoppen{% else %}Pegel-Meter starten{% endif %}
+          </button>
+          <span id="meter-autostart-status" class="meta-inline" title="Autostart-Status">
+            Autostart: {% if meter_autostart %}<span id="autostart-badge" class="badge badge-on">an</span>{% else %}<span id="autostart-badge" class="badge badge-off">aus</span>{% endif %}
+          </span>
           <span id="status">Bereit</span>
         </div>
       </header>
@@ -154,9 +160,125 @@
     <script>
       window.AUDIO_BOOTSTRAP = {
         snapshot_hash: {{ snapshot.snapshot_hash | tojson }},
-        expert_mode: {{ expert_mode | tojson }}
+        expert_mode: {{ expert_mode | tojson }},
+        meter_running: {{ meter_running | tojson }},
+        meter_autostart: {{ meter_autostart | tojson }}
       };
     </script>
     <script src="{{ url_for('static', filename='js/audio-controller.js') }}"></script>
+
+    <style>
+      #repo-update-widget{position:fixed;right:14px;bottom:14px;z-index:2000}
+      #repo-update-open{border:1px solid #334155;background:#0f172a;color:#e2e8f0;border-radius:999px;padding:8px 14px;font-size:12px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}
+      #repo-update-open.has-update{border-color:#f59e0b;color:#f59e0b}
+      #repo-update-open.up-to-date{border-color:#16a34a;color:#16a34a}
+      #repo-update-modal{position:fixed;inset:0;background:rgba(2,6,23,.75);display:none;align-items:center;justify-content:center;z-index:2100;padding:14px}
+      #repo-update-modal.open{display:flex}
+      #repo-update-modal .rud-dialog{width:min(760px,96vw);max-height:90vh;overflow:auto;background:#0b1220;color:#e2e8f0;border:1px solid #334155;border-radius:12px;padding:18px}
+      #repo-update-modal h3{margin:0 0 10px}
+      #repo-update-modal .rud-meta{font-size:12px;color:#94a3b8;margin-bottom:10px}
+      #repo-update-modal .rud-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+      #repo-update-modal button{border:1px solid #334155;background:#111827;color:#e2e8f0;border-radius:8px;padding:8px 14px;font-size:13px;cursor:pointer}
+      #repo-update-modal button.primary{background:#2563eb;border-color:#2563eb;color:#fff}
+      #repo-update-modal button:disabled{opacity:.5;cursor:default}
+      #repo-update-log{white-space:pre-wrap;background:#020617;border:1px solid #1e3a5f;border-radius:8px;padding:10px;max-height:40vh;overflow:auto;font-size:11px;font-family:monospace;margin-top:8px}
+      #repo-update-link{font-size:12px;color:#60a5fa;margin-top:6px}
+      #repo-update-link a{color:#60a5fa}
+    </style>
+
+    <div id="repo-update-widget">
+      <button id="repo-update-open" type="button">Update prüfen…</button>
+    </div>
+
+    <div id="repo-update-modal" aria-hidden="true">
+      <div class="rud-dialog">
+        <h3>&#x1F4E6; Repository Update</h3>
+        <div id="repo-update-status">Status wird geladen…</div>
+        <div id="repo-update-meta" class="rud-meta"></div>
+        <div id="repo-update-link"></div>
+        <pre id="repo-update-log">-</pre>
+        <div class="rud-actions">
+          <button id="repo-update-apply" class="primary" type="button">Update ausführen</button>
+          <button id="repo-update-refresh" type="button">Neu prüfen</button>
+          <button id="repo-update-close" type="button">Schließen</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+    (function(){
+      const openBtn  = document.getElementById('repo-update-open');
+      const modal    = document.getElementById('repo-update-modal');
+      const closeBtn = document.getElementById('repo-update-close');
+      const refreshBtn = document.getElementById('repo-update-refresh');
+      const applyBtn = document.getElementById('repo-update-apply');
+      const statusEl = document.getElementById('repo-update-status');
+      const metaEl   = document.getElementById('repo-update-meta');
+      const linkEl   = document.getElementById('repo-update-link');
+      const logEl    = document.getElementById('repo-update-log');
+      if (!openBtn || !modal) return;
+
+      let _state = {};
+
+      function setOpen(v) { modal.classList.toggle('open', !!v); modal.setAttribute('aria-hidden', !v); }
+
+      function setBadge(p) {
+        openBtn.classList.remove('has-update', 'up-to-date');
+        if (p && p.ok && p.update_available) { openBtn.classList.add('has-update'); openBtn.textContent = '⬆ Update vorhanden'; }
+        else if (p && p.ok)                  { openBtn.classList.add('up-to-date'); openBtn.textContent = '✓ Up-to-date'; }
+        else                                 { openBtn.textContent = 'Update prüfen'; }
+      }
+
+      function render(p) {
+        _state = p || {};
+        statusEl.textContent = String(p.message || 'Status unbekannt');
+        metaEl.textContent   = `Branch: ${p.branch||'-'} | Lokal: ${p.local_commit||'-'} | Remote: ${p.remote_commit||'-'} | Ahead: ${p.ahead??'-'} | Behind: ${p.behind??'-'}`;
+        logEl.textContent    = String(p.log || '-');
+
+        const repoUrl = 'https://github.com/Joormann-Media/Joormann-Media-DevicePortal-Audio-Controller';
+        const commitUrl = p.remote_commit ? `${repoUrl}/commit/${p.remote_commit}` : repoUrl;
+        linkEl.innerHTML = `<a href="${repoUrl}" target="_blank" rel="noopener">GitHub Repository</a>`
+          + (p.remote_commit ? ` &nbsp;·&nbsp; <a href="${commitUrl}" target="_blank" rel="noopener">Remote-Commit ${p.remote_commit}</a>` : '');
+
+        applyBtn.disabled = !p.update_available;
+        setBadge(p);
+      }
+
+      async function check() {
+        statusEl.textContent = 'Prüfe…';
+        openBtn.textContent  = 'Prüfe…';
+        try {
+          const r = await fetch('/api/update/status', { cache: 'no-store' });
+          render(await r.json());
+        } catch(e) { render({ ok: false, message: 'Update-Check fehlgeschlagen', log: String(e) }); }
+      }
+
+      async function apply() {
+        applyBtn.disabled = true;
+        statusEl.textContent = 'Update läuft…';
+        try {
+          const r = await fetch('/api/update/apply', { method: 'POST', cache: 'no-store' });
+          const j = await r.json();
+          render(j);
+          if (j && j.ok) {
+            statusEl.textContent = 'Update erfolgreich – Seite lädt neu…';
+            setTimeout(() => window.location.reload(), 2000);
+          }
+        } catch(e) {
+          render({ ok: false, message: 'Update fehlgeschlagen', log: String(e) });
+          applyBtn.disabled = false;
+        }
+      }
+
+      openBtn.addEventListener('click', () => setOpen(true));
+      closeBtn?.addEventListener('click', () => setOpen(false));
+      refreshBtn?.addEventListener('click', check);
+      applyBtn?.addEventListener('click', apply);
+      modal.addEventListener('click', (ev) => { if (ev.target === modal) setOpen(false); });
+      document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') setOpen(false); });
+
+      check();
+    })();
+    </script>
   </body>
 </html>

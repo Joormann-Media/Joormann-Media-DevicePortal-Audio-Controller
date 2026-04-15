@@ -4,8 +4,27 @@ import hashlib
 import json
 import platform
 import time
+from pathlib import Path
 from threading import Lock
 from typing import Any, Dict
+
+_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "config"
+_METER_AUTOSTART_FILE = _CONFIG_DIR / "meter_autostart.json"
+
+
+def _read_meter_autostart() -> bool:
+    try:
+        data = json.loads(_METER_AUTOSTART_FILE.read_text(encoding="utf-8"))
+        return bool(data.get("enabled", False))
+    except Exception:
+        return False
+
+
+def _write_meter_autostart(enabled: bool) -> None:
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _METER_AUTOSTART_FILE.write_text(
+        json.dumps({"enabled": enabled}, indent=2), encoding="utf-8"
+    )
 
 from app.services.audio_backend import AudioBackend
 from app.services.audio_calibration import AudioCalibrationService
@@ -27,6 +46,8 @@ class AudioService:
         self._snapshot_cache: Dict[str, Any] | None = None
         self._snapshot_cache_ts: float = 0.0
         self._snapshot_cache_ttl_sec: float = 1.5
+        if _read_meter_autostart():
+            self.meter.start()
 
     def build_snapshot(self, include_diagnostics: bool = False) -> Dict[str, Any]:
         with self._lock:
@@ -330,6 +351,28 @@ class AudioService:
             return {"ok": False, "error": "nothing applied", "errors": errors}
 
         return {"ok": True, "applied": applied, "errors": errors}
+
+    # ── Meter runtime control ──────────────────────────────────────────────────
+
+    def meter_status(self) -> Dict[str, Any]:
+        s = self.meter.status()
+        return {"ok": True, "running": s["running"], "worker_count": s["worker_count"], "autostart": _read_meter_autostart()}
+
+    def meter_start(self) -> Dict[str, Any]:
+        self.meter.start()
+        return {"ok": True, "running": True}
+
+    def meter_stop(self) -> Dict[str, Any]:
+        self.meter.stop()
+        return {"ok": True, "running": False}
+
+    def meter_autostart_enable(self) -> Dict[str, Any]:
+        _write_meter_autostart(True)
+        return {"ok": True, "autostart": True}
+
+    def meter_autostart_disable(self) -> Dict[str, Any]:
+        _write_meter_autostart(False)
+        return {"ok": True, "autostart": False}
 
     # Backward-compatible wrappers
     def set_device_volume(self, stable_id: str, volume_percent: int) -> Dict[str, Any]:
