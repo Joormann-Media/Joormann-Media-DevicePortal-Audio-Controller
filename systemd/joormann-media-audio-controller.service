@@ -1,0 +1,17 @@
+[Unit]
+Description=Joormann Media Service (Joormann-Media-Audio-Controller)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=__SERVICE_USER__
+Group=__SERVICE_USER__
+WorkingDirectory=/home/djanebmb/projects/Joormann-Media-Audio-Controller
+ExecStart=/home/djanebmb/projects/Joormann-Media-Audio-Controller/scripts/start-dev.sh
+ExecStop=/home/djanebmb/projects/Joormann-Media-Audio-Controller/scripts/stop-dev.sh
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target
