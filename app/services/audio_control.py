@@ -32,24 +32,35 @@ class AudioControlService:
         if not technical_name:
             return False, "missing technical_name"
         volume_percent = max(0, min(150, int(volume_percent)))
-        res = self.runner.run(["pactl", "set-sink-volume", technical_name, f"{volume_percent}%"], timeout=4)
-        if res.success:
-            logger.info("set output volume %s -> %s%%", technical_name, volume_percent)
+        if not self._is_alsa_fallback_device(device):
+            res = self.runner.run(["pactl", "set-sink-volume", technical_name, f"{volume_percent}%"], timeout=4)
+            if res.success:
+                logger.info("set output volume %s -> %s%%", technical_name, volume_percent)
+                return True, "ok"
+            logger.warning("set output volume failed %s: %s", technical_name, res.error)
+
+        # ALSA fallback for systems without working Pulse/PipeWire session.
+        ok, msg = self._set_alsa_volume(device, volume_percent=volume_percent, input_device=False)
+        if ok:
             return True, "ok"
-        logger.warning("set output volume failed %s: %s", technical_name, res.error)
-        return False, res.error or "command failed"
+        return False, msg
 
     def set_input_volume(self, device: Dict[str, Any], volume_percent: int) -> Tuple[bool, str]:
         technical_name = device.get("technical_name", "")
         if not technical_name:
             return False, "missing technical_name"
         volume_percent = max(0, min(150, int(volume_percent)))
-        res = self.runner.run(["pactl", "set-source-volume", technical_name, f"{volume_percent}%"], timeout=4)
-        if res.success:
-            logger.info("set input source volume %s -> %s%%", technical_name, volume_percent)
+        if not self._is_alsa_fallback_device(device):
+            res = self.runner.run(["pactl", "set-source-volume", technical_name, f"{volume_percent}%"], timeout=4)
+            if res.success:
+                logger.info("set input source volume %s -> %s%%", technical_name, volume_percent)
+                return True, "ok"
+            logger.warning("set input source volume failed %s: %s", technical_name, res.error)
+
+        ok, msg = self._set_alsa_volume(device, volume_percent=volume_percent, input_device=True)
+        if ok:
             return True, "ok"
-        logger.warning("set input source volume failed %s: %s", technical_name, res.error)
-        return False, res.error or "command failed"
+        return False, msg
 
     def set_output_mute(self, device: Dict[str, Any], mute: bool) -> Tuple[bool, str]:
         technical_name = device.get("technical_name", "")
@@ -209,3 +220,91 @@ class AudioControlService:
             "channel_mode": mode,
             "capabilities": caps,
         }
+
+    def _is_alsa_fallback_device(self, device: Dict[str, Any]) -> bool:
+        technical_name = str(device.get("technical_name", ""))
+        if technical_name.startswith("alsa:hw:"):
+            return True
+        return "alsa_fallback_only" in (device.get("diagnostic_flags", []) or [])
+
+    def _device_card_index(self, device: Dict[str, Any]) -> int | None:
+        card_index = device.get("card_index")
+        if isinstance(card_index, int):
+            return card_index
+        technical_name = str(device.get("technical_name", ""))
+        m = re.match(r"^alsa:hw:(\d+),(\d+)$", technical_name)
+        if not m:
+            return None
+        return int(m.group(1))
+
+    def _set_alsa_volume(self, device: Dict[str, Any], *, volume_percent: int, input_device: bool) -> Tuple[bool, str]:
+        card_index = self._device_card_index(device)
+        if card_index is None:
+            return False, "no card_index available"
+        alsa_percent = max(0, min(100, int(volume_percent)))
+        names = self._candidate_alsa_controls(device, input_device=input_device)
+        if not names:
+            return False, "no suitable alsa control found"
+
+        last_error = "command failed"
+        for control_name in names:
+            res = self.runner.run(["amixer", "-c", str(card_index), "sset", control_name, f"{alsa_percent}%"], timeout=4)
+            if res.success:
+                logger.info(
+                    "set alsa %s volume card=%s control=%s -> %s%%",
+                    "input" if input_device else "output",
+                    card_index,
+                    control_name,
+                    alsa_percent,
+                )
+                return True, "ok"
+            if res.error:
+                last_error = res.error
+        logger.warning(
+            "set alsa %s volume failed card=%s controls=%s err=%s",
+            "input" if input_device else "output",
+            card_index,
+            ",".join(names),
+            last_error,
+        )
+        return False, last_error
+
+    def _candidate_alsa_controls(self, device: Dict[str, Any], *, input_device: bool) -> list[str]:
+        controls = device.get("hw_controls", []) or device.get("alsa_controls", []) or []
+        candidates: list[str] = []
+        seen: set[str] = set()
+
+        def add(name: str) -> None:
+            n = str(name).strip()
+            if not n:
+                return
+            key = n.lower()
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(n)
+
+        if input_device:
+            add(str(device.get("hardware_gain_name", "")))
+            add(str(device.get("capture_gain_control", "")))
+            add(str(device.get("mic_boost_control", "")))
+        for c in controls:
+            if not bool(c.get("has_volume", False)):
+                continue
+            name = str(c.get("name", "")).strip()
+            if not name:
+                continue
+            lname = name.lower()
+            if input_device:
+                score_keys = ["capture", "mic", "input gain", "digital", "boost", "line"]
+            else:
+                score_keys = ["master", "pcm", "speaker", "headphone", "digital", "lineout", "line out"]
+            if any(k in lname for k in score_keys):
+                add(name)
+        if input_device:
+            for n in ["Capture", "Mic", "Input Gain", "Digital", "Mic Boost", "Line"]:
+                add(n)
+        else:
+            for n in ["Master", "PCM", "Speaker", "Headphone", "Digital", "Line Out", "Lineout"]:
+                add(n)
+        return candidates

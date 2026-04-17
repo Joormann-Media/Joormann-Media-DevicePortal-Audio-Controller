@@ -230,6 +230,27 @@ def _choose_amixer_controls(card_idx: int | None, amixer_per_card: Dict[str, Any
     }
 
 
+def _choose_amixer_output_control(card_idx: int | None, amixer_per_card: Dict[str, Any]) -> Dict[str, Any] | None:
+    if card_idx is None:
+        return None
+    card = amixer_per_card.get(str(card_idx), {})
+    controls = card.get("parsed_controls", []) or []
+    preferred = ["master", "pcm", "speaker", "headphone", "digital", "line out", "lineout"]
+    chosen: Dict[str, Any] | None = None
+    for key in preferred:
+        for c in controls:
+            if not bool(c.get("has_volume", False)):
+                continue
+            name = str(c.get("name", "")).lower()
+            if key in name:
+                return c
+    for c in controls:
+        if bool(c.get("has_volume", False)):
+            chosen = c
+            break
+    return chosen
+
+
 def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
     parsed = raw["parsed"]
     defaults = raw["defaults"]
@@ -469,6 +490,8 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
             technical_name = f"alsa:hw:{row.get('card_index', '')},{row.get('device_index', '')}"
             display_name = card_name if not device_name or device_name == card_name else f"{card_name} ({device_name})"
             bus = _bus_type(technical_name, display_name, {})
+            card_index = int(row.get("card_index")) if row.get("card_index") is not None else None
+            output_control = _choose_amixer_output_control(card_index, parsed["amixer_per_card"])
             device = AudioDevice(
                 stable_id=_stable_id("output_device", technical_name, card_name),
                 device_class="output_device",
@@ -476,7 +499,7 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
                 technical_name=technical_name,
                 backend_ids={"pactl": "", "wpctl": ""},
                 card_name=card_name,
-                card_index=int(row.get("card_index")) if row.get("card_index") is not None else None,
+                card_index=card_index,
                 device_index=int(row.get("device_index")) if row.get("device_index") is not None else None,
                 bus_type=bus,
                 connection_label=_connection_label("", bus, display_name),
@@ -484,6 +507,13 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
                 hardware_present=True,
                 physical_likely=True,
                 state="unknown",
+                volume_percent_current=(output_control or {}).get("percent"),
+                volume_db_current=(output_control or {}).get("db"),
+                volume_raw_current=(output_control or {}).get("raw_value"),
+                has_hw_volume=bool(output_control),
+                volume_percent=(output_control or {}).get("percent"),
+                hw_controls=(parsed["amixer_per_card"].get(str(card_index), {}) or {}).get("parsed_controls", []),
+                alsa_controls=(parsed["amixer_per_card"].get(str(card_index), {}) or {}).get("parsed_controls", []),
             )
             device.diagnostic_flags.append("alsa_fallback_only")
             output_devices.append(device)
@@ -516,6 +546,9 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
                 hardware_present=True,
                 physical_likely=True,
                 state="unknown",
+                source_volume_percent_current=(hardware_gain or {}).get("percent"),
+                source_volume_db_current=(hardware_gain or {}).get("db"),
+                source_volume_raw_current=(hardware_gain or {}).get("raw_value"),
                 has_capture_gain=bool(hardware_gain),
                 capture_gain_percent=(hardware_gain or {}).get("percent"),
                 capture_gain_db=(hardware_gain or {}).get("db"),
