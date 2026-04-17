@@ -23,6 +23,22 @@ FLASK_PORT="${FLASK_PORT:-5071}"
 FLASK_DEBUG="${FLASK_DEBUG:-0}"
 AUTO_PORT_FALLBACK="${AUTO_PORT_FALLBACK:-1}"
 
+ensure_audio_session_env() {
+  local uid runtime_dir
+  uid="$(id -u)"
+  runtime_dir="/run/user/$uid"
+
+  if [[ -z "${XDG_RUNTIME_DIR:-}" && -d "$runtime_dir" ]]; then
+    export XDG_RUNTIME_DIR="$runtime_dir"
+  fi
+  if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" && -n "${XDG_RUNTIME_DIR:-}" && -S "${XDG_RUNTIME_DIR}/bus" ]]; then
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+  fi
+  if [[ -z "${PULSE_SERVER:-}" && -n "${XDG_RUNTIME_DIR:-}" && -S "${XDG_RUNTIME_DIR}/pulse/native" ]]; then
+    export PULSE_SERVER="unix:${XDG_RUNTIME_DIR}/pulse/native"
+  fi
+}
+
 is_port_in_use() {
   local port="$1"
   python3 - "$port" <<'PY' >/dev/null 2>&1
@@ -98,9 +114,17 @@ if is_port_in_use "$FLASK_PORT"; then
   fi
 fi
 
+ensure_audio_session_env
+
 (
   cd "$PROJECT_ROOT"
-  nohup env FLASK_HOST="$FLASK_HOST" FLASK_PORT="$FLASK_PORT" FLASK_DEBUG="$FLASK_DEBUG" \
+  nohup env \
+    FLASK_HOST="$FLASK_HOST" \
+    FLASK_PORT="$FLASK_PORT" \
+    FLASK_DEBUG="$FLASK_DEBUG" \
+    XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
+    DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}" \
+    PULSE_SERVER="${PULSE_SERVER:-}" \
     "$PYTHON_BIN" app.py >>"$LOG_FILE" 2>&1 &
   echo $! > "$PID_FILE"
 )

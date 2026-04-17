@@ -460,6 +460,93 @@ def normalize_audio(raw: Dict[str, Any]) -> Dict[str, Any]:
         else:
             input_devices.append(device)
 
+    # ALSA-only fallback: when Pulse/PipeWire cannot be queried, still expose
+    # physical ALSA hardware so the UI is not empty on minimal/headless systems.
+    if not output_devices:
+        for row in parsed["alsa_playback_hw"]:
+            card_name = str(row.get("card_name", "")).strip()
+            device_name = str(row.get("device_name", "")).strip()
+            technical_name = f"alsa:hw:{row.get('card_index', '')},{row.get('device_index', '')}"
+            display_name = card_name if not device_name or device_name == card_name else f"{card_name} ({device_name})"
+            bus = _bus_type(technical_name, display_name, {})
+            device = AudioDevice(
+                stable_id=_stable_id("output_device", technical_name, card_name),
+                device_class="output_device",
+                display_name=display_name or technical_name,
+                technical_name=technical_name,
+                backend_ids={"pactl": "", "wpctl": ""},
+                card_name=card_name,
+                card_index=int(row.get("card_index")) if row.get("card_index") is not None else None,
+                device_index=int(row.get("device_index")) if row.get("device_index") is not None else None,
+                bus_type=bus,
+                connection_label=_connection_label("", bus, display_name),
+                description=display_name,
+                hardware_present=True,
+                physical_likely=True,
+                state="unknown",
+            )
+            device.diagnostic_flags.append("alsa_fallback_only")
+            output_devices.append(device)
+
+    if not input_devices:
+        for row in parsed["alsa_capture_hw"]:
+            card_name = str(row.get("card_name", "")).strip()
+            device_name = str(row.get("device_name", "")).strip()
+            technical_name = f"alsa:hw:{row.get('card_index', '')},{row.get('device_index', '')}"
+            display_name = card_name if not device_name or device_name == card_name else f"{card_name} ({device_name})"
+            bus = _bus_type(technical_name, display_name, {})
+            mixer = _choose_amixer_controls(
+                int(row.get("card_index")) if row.get("card_index") is not None else None,
+                parsed["amixer_per_card"],
+            )
+            hardware_gain = mixer["hardware_gain"]
+            mic_boost = mixer["mic_boost"]
+            device = AudioDevice(
+                stable_id=_stable_id("input_device", technical_name, card_name),
+                device_class="input_device",
+                display_name=display_name or technical_name,
+                technical_name=technical_name,
+                backend_ids={"pactl": "", "wpctl": ""},
+                card_name=card_name,
+                card_index=int(row.get("card_index")) if row.get("card_index") is not None else None,
+                device_index=int(row.get("device_index")) if row.get("device_index") is not None else None,
+                bus_type=bus,
+                connection_label=_connection_label("", bus, display_name),
+                description=display_name,
+                hardware_present=True,
+                physical_likely=True,
+                state="unknown",
+                has_capture_gain=bool(hardware_gain),
+                capture_gain_percent=(hardware_gain or {}).get("percent"),
+                capture_gain_db=(hardware_gain or {}).get("db"),
+                capture_gain_control=(hardware_gain or {}).get("name", ""),
+                capture_gain_raw=(hardware_gain or {}).get("raw_value"),
+                capture_gain_min_raw=(hardware_gain or {}).get("min_raw"),
+                capture_gain_max_raw=(hardware_gain or {}).get("max_raw"),
+                capture_gain_switch_on=(hardware_gain or {}).get("switch_on"),
+                hardware_gain_available=bool(hardware_gain),
+                hardware_gain_name=(hardware_gain or {}).get("name", ""),
+                hardware_gain_kind=(hardware_gain or {}).get("kind", ""),
+                hardware_gain_percent=(hardware_gain or {}).get("percent"),
+                hardware_gain_db=(hardware_gain or {}).get("db"),
+                hardware_gain_raw=(hardware_gain or {}).get("raw_value"),
+                hardware_gain_min_raw=(hardware_gain or {}).get("min_raw"),
+                hardware_gain_max_raw=(hardware_gain or {}).get("max_raw"),
+                hardware_gain_switch_on=(hardware_gain or {}).get("switch_on"),
+                mic_boost_available=bool(mic_boost),
+                mic_boost_percent=(mic_boost or {}).get("percent"),
+                mic_boost_db=(mic_boost or {}).get("db"),
+                mic_boost_control=(mic_boost or {}).get("name", ""),
+                mic_boost_raw=(mic_boost or {}).get("raw_value"),
+                mic_boost_min_raw=(mic_boost or {}).get("min_raw"),
+                mic_boost_max_raw=(mic_boost or {}).get("max_raw"),
+                mic_boost_switch_on=(mic_boost or {}).get("switch_on"),
+                hw_controls=mixer["controls"],
+                alsa_controls=mixer["controls"],
+            )
+            device.diagnostic_flags.append("alsa_fallback_only")
+            input_devices.append(device)
+
     devices_by_stable_id = {
         d.stable_id: d
         for d in [*output_devices, *input_devices, *monitor_devices, *virtual_devices, *hidden_diagnostic_only]

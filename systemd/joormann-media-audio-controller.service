@@ -8,6 +8,9 @@ Type=oneshot
 RemainAfterExit=yes
 User=__SERVICE_USER__
 Group=__SERVICE_USER__
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
+Environment=PULSE_SERVER=unix:/run/user/%U/pulse/native
 WorkingDirectory=/home/djanebmb/projects/Joormann-Media-Audio-Controller
 ExecStart=/home/djanebmb/projects/Joormann-Media-Audio-Controller/scripts/start-dev.sh
 ExecStop=/home/djanebmb/projects/Joormann-Media-Audio-Controller/scripts/stop-dev.sh

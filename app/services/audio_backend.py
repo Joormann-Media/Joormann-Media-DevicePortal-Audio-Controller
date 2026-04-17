@@ -270,8 +270,9 @@ class AudioBackend:
 
     def _parse_alsa_hw(self, text: str) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
+        # Supports English and localized ALSA output (e.g. German "Karte ... Gerät ...").
         pattern = re.compile(
-            r"card\s+(\d+):\s+([^\[]+)\[([^\]]+)\],\s+device\s+(\d+):\s+([^\[]+)\[([^\]]+)\]",
+            r"(?:card|karte)\s+(\d+):\s+([^\[]+)\[([^\]]+)\],\s+(?:device|gerät|geraet)\s+(\d+):\s+([^\[]+)\[([^\]]+)\]",
             re.IGNORECASE,
         )
         for line in text.splitlines():
