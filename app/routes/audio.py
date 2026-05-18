@@ -1,15 +1,72 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
+from urllib.request import urlopen, Request
 
 from flask import Blueprint, Response, jsonify, render_template, request, send_file
 
 from app.services.audio_service import AudioService
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_AUDIOPLAYER_BASE_PATHS = [
+    Path.home() / "projects" / "Joormann-Media-Jarvis-AudioPlayer",
+    Path("/mnt/ai-ssd/Joormann-Media-Jarvis-AudioPlayer"),
+]
+
+
+def _find_zones_dir() -> Path | None:
+    for base in _AUDIOPLAYER_BASE_PATHS:
+        z = base / "config" / "zones"
+        if z.is_dir():
+            return z
+    return None
+
+
+def _load_zone_configs() -> list[dict[str, Any]]:
+    zones_dir = _find_zones_dir()
+    if not zones_dir:
+        return []
+    zones = []
+    for env_file in sorted(zones_dir.glob("zone-*.env")):
+        cfg: dict[str, Any] = {"file": env_file.name, "zone_name": "", "sink_name": "", "bt_address": "", "port": ""}
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                k, _, v = line.partition("=")
+                k, v = k.strip(), v.strip().strip('"')
+                if k == "AUDIOPLAYER_ZONE_NAME":
+                    cfg["zone_name"] = v
+                elif k == "AUDIOPLAYER_SINK_NAME":
+                    cfg["sink_name"] = v
+                elif k == "AUDIOPLAYER_BT_ADDRESS":
+                    cfg["bt_address"] = v
+                elif k == "FLASK_PORT":
+                    cfg["port"] = v
+        if not cfg["zone_name"]:
+            cfg["zone_name"] = env_file.stem.replace("zone-", "")
+        zones.append(cfg)
+    return zones
+
+
+def _fetch_zone_status(port: str) -> dict[str, Any]:
+    if not port:
+        return {"ok": False, "error": "no_port"}
+    url = f"http://127.0.0.1:{port}/api/audio/status"
+    try:
+        req = Request(url, headers={"User-Agent": "AudioController/1.0"})
+        with urlopen(req, timeout=3) as r:
+            data = json.loads(r.read().decode())
+        inner = data.get("data") or data
+        return {"ok": True, "status": inner}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 def _run_repo_update(mode: str) -> tuple[dict, int]:
@@ -58,13 +115,152 @@ def audio_index():
     expert_mode = request.args.get("expert", "0") == "1"
     snapshot = audio_service.build_snapshot(include_diagnostics=expert_mode)
     meter_status = audio_service.meter_status()
+    zone_configs = _load_zone_configs()
+    zones_with_status = []
+    for z in zone_configs:
+        status = _fetch_zone_status(z.get("port", ""))
+        zones_with_status.append({**z, "live": status})
     return render_template(
         "audio/index.html",
         snapshot=snapshot,
         expert_mode=expert_mode,
         meter_running=meter_status["running"],
         meter_autostart=meter_status["autostart"],
+        zones=zones_with_status,
     )
+
+
+@audio_bp.get("/api/audio/zones")
+def api_zones():
+    zone_configs = _load_zone_configs()
+    zones_with_status = []
+    for z in zone_configs:
+        status = _fetch_zone_status(z.get("port", ""))
+        zones_with_status.append({**z, "live": status})
+    return jsonify({"ok": True, "zones": zones_with_status})
+
+
+@audio_bp.get("/audio/zones")
+def audio_zones_ui():
+    zone_configs = _load_zone_configs()
+    zones_with_status = []
+    for z in zone_configs:
+        status = _fetch_zone_status(z.get("port", ""))
+        zones_with_status.append({**z, "live": status})
+    return render_template("audio/zones.html", zones=zones_with_status)
+
+
+@audio_bp.post("/api/audio/zones")
+def api_zones_create():
+    body = request.get_json(silent=True) or {}
+    name = str(body.get("zone_name") or "").strip().lower().replace(" ", "-")
+    port = str(body.get("port") or "").strip()
+    sink = str(body.get("sink_name") or "").strip()
+    bt_addr = str(body.get("bt_address") or "").strip()
+
+    if not name or not port:
+        return jsonify({"ok": False, "error": "zone_name und port sind Pflichtfelder"}), 400
+
+    zones_dir = _find_zones_dir()
+    if not zones_dir:
+        return jsonify({"ok": False, "error": "zones-Verzeichnis nicht gefunden"}), 500
+
+    env_path = zones_dir / f"zone-{name}.env"
+    if env_path.exists():
+        return jsonify({"ok": False, "error": f"Zone '{name}' existiert bereits"}), 409
+
+    # Prüfe Port-Konflikt
+    for z in _load_zone_configs():
+        if z.get("port") == port:
+            return jsonify({"ok": False, "error": f"Port {port} bereits von Zone '{z['zone_name']}' belegt"}), 409
+
+    lines = [
+        f"FLASK_PORT={port}",
+        f"AUDIOPLAYER_ZONE_NAME={name}",
+        f"AUDIOPLAYER_SINK_NAME={sink}",
+        f"AUDIOPLAYER_BT_ADDRESS={bt_addr}",
+    ]
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return jsonify({"ok": True, "zone_name": name, "port": port, "file": env_path.name}), 201
+
+
+@audio_bp.put("/api/audio/zones/<zone_name>")
+def api_zones_update(zone_name: str):
+    body = request.get_json(silent=True) or {}
+    zones_dir = _find_zones_dir()
+    if not zones_dir:
+        return jsonify({"ok": False, "error": "zones-Verzeichnis nicht gefunden"}), 500
+
+    env_path = zones_dir / f"zone-{zone_name}.env"
+    if not env_path.exists():
+        return jsonify({"ok": False, "error": f"Zone '{zone_name}' nicht gefunden"}), 404
+
+    port = str(body.get("port") or "").strip()
+    sink = str(body.get("sink_name") or "").strip()
+    bt_addr = str(body.get("bt_address") or "").strip()
+
+    if not port:
+        return jsonify({"ok": False, "error": "port ist Pflichtfeld"}), 400
+
+    lines = [
+        f"FLASK_PORT={port}",
+        f"AUDIOPLAYER_ZONE_NAME={zone_name}",
+        f"AUDIOPLAYER_SINK_NAME={sink}",
+        f"AUDIOPLAYER_BT_ADDRESS={bt_addr}",
+    ]
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return jsonify({"ok": True, "zone_name": zone_name, "port": port})
+
+
+@audio_bp.delete("/api/audio/zones/<zone_name>")
+def api_zones_delete(zone_name: str):
+    zones_dir = _find_zones_dir()
+    if not zones_dir:
+        return jsonify({"ok": False, "error": "zones-Verzeichnis nicht gefunden"}), 500
+
+    env_path = zones_dir / f"zone-{zone_name}.env"
+    if not env_path.exists():
+        return jsonify({"ok": False, "error": f"Zone '{zone_name}' nicht gefunden"}), 404
+
+    env_path.unlink()
+    return jsonify({"ok": True, "deleted": zone_name})
+
+
+@audio_bp.post("/api/audio/zones/<zone_name>/start")
+def api_zones_start(zone_name: str):
+    audioplayer_base = _find_zones_dir()
+    if not audioplayer_base:
+        return jsonify({"ok": False, "error": "zones-Verzeichnis nicht gefunden"}), 500
+    start_script = audioplayer_base.parent.parent / "scripts" / "start-zone.sh"
+    if not start_script.exists():
+        return jsonify({"ok": False, "error": f"start-zone.sh nicht gefunden: {start_script}"}), 500
+    try:
+        proc = subprocess.run(
+            ["bash", str(start_script), zone_name],
+            capture_output=True, text=True, timeout=30,
+        )
+        ok = proc.returncode == 0
+        return jsonify({"ok": ok, "stdout": proc.stdout.strip(), "stderr": proc.stderr.strip()})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@audio_bp.post("/api/audio/zones/<zone_name>/stop")
+def api_zones_stop(zone_name: str):
+    audioplayer_base = _find_zones_dir()
+    if not audioplayer_base:
+        return jsonify({"ok": False, "error": "zones-Verzeichnis nicht gefunden"}), 500
+    stop_script = audioplayer_base.parent.parent / "scripts" / "stop-zone.sh"
+    if not stop_script.exists():
+        return jsonify({"ok": False, "error": f"stop-zone.sh nicht gefunden: {stop_script}"}), 500
+    try:
+        proc = subprocess.run(
+            ["bash", str(stop_script), zone_name],
+            capture_output=True, text=True, timeout=15,
+        )
+        return jsonify({"ok": proc.returncode == 0, "stdout": proc.stdout.strip()})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 @audio_bp.get("/api/audio/summary")

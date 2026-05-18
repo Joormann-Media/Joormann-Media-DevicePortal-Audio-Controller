@@ -15,6 +15,7 @@
         </div>
         <div class="controls">
           <button id="refresh-btn" class="primary">Aktualisieren</button>
+          <a href="/audio/zones" style="padding:6px 14px;background:var(--card,#1e1e1e);border:1px solid var(--border,#333);border-radius:4px;text-decoration:none;color:inherit;font-size:.85rem;white-space:nowrap">🔊 Zonen</a>
           <button id="bt-open-btn" class="bt-open-btn">&#x1F4F6; Bluetooth</button>
           <button id="expert-toggle">{% if expert_mode %}Expertenmodus aus{% else %}Expertenmodus an{% endif %}</button>
           <button id="meter-toggle" class="{% if meter_running %}meter-active{% else %}meter-inactive{% endif %}">
@@ -36,6 +37,65 @@
         <article class="kpi"><div class="label">WirePlumber/PipeWire</div><div class="value">{{ snapshot.summary.wireplumber_status }}</div></article>
         <article class="kpi"><div class="label">Letztes Update (UTC)</div><div class="value" data-kpi="updated">{{ snapshot.timestamp_utc }}</div></article>
       </section>
+
+      {% if zones %}
+      <section class="section">
+        <h2>Audio-Zonen</h2>
+        <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px">
+          {% for z in zones %}
+          {% set live = z.live or {} %}
+          {% set st = live.status or {} %}
+          {% set zone_info = st.zone or {} %}
+          {% set radio = st.radio or {} %}
+          {% set tts = st.tts or {} %}
+          {% set is_up = live.ok %}
+          <article class="card" style="border-left:3px solid {% if is_up %}var(--good,#4caf50){% else %}var(--bad,#f44336){% endif %}">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+              <strong style="font-size:1rem">{{ z.zone_name }}</strong>
+              <span style="font-size:.75rem;padding:2px 8px;border-radius:12px;background:{% if is_up %}#1a3a1a{% else %}#3a1a1a{% endif %};color:{% if is_up %}#7ef07e{% else %}#f07e7e{% endif %}">
+                {% if is_up %}online{% else %}offline{% endif %}
+              </span>
+            </div>
+            <div style="font-size:.8rem;color:var(--muted,#888);margin-bottom:6px;font-family:monospace">Port {{ z.port }}</div>
+            <div style="font-size:.82rem;margin-bottom:4px">
+              <span style="color:var(--muted,#888)">Sink:</span>
+              <span style="font-family:monospace;font-size:.78rem">{{ z.sink_name or '@DEFAULT_SINK@' }}</span>
+            </div>
+            {% if z.bt_address %}
+            <div style="font-size:.82rem;margin-bottom:4px">
+              <span style="color:var(--muted,#888)">BT:</span>
+              {% if is_up %}
+                {% set sink_ok = zone_info.sink_available %}
+                <span style="color:{% if sink_ok %}var(--good,#4caf50){% else %}var(--bad,#f44336){% endif %}">
+                  {% if sink_ok %}verbunden{% else %}getrennt{% endif %}
+                </span>
+              {% else %}
+                <span style="color:var(--muted)">{{ z.bt_address }}</span>
+              {% endif %}
+            </div>
+            {% endif %}
+            {% if is_up %}
+            <div style="font-size:.82rem;margin-top:6px;padding-top:6px;border-top:1px solid var(--border,#333)">
+              <span style="color:var(--muted,#888)">Wiedergabe:</span>
+              <strong>{{ st.active_source or 'idle' }}</strong>
+              {% if radio.running and radio.stream_url %}
+              <div style="font-size:.75rem;color:var(--muted,#888);font-family:monospace;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ radio.stream_url }}">{{ radio.stream_url }}</div>
+              {% endif %}
+            </div>
+            <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
+              {% if z.bt_address %}
+              <button onclick="zoneAction('{{ z.port }}','bt_connect')" style="font-size:.75rem;padding:3px 8px" class="good">BT verbinden</button>
+              <button onclick="zoneAction('{{ z.port }}','bt_disconnect')" style="font-size:.75rem;padding:3px 8px" class="bad">BT trennen</button>
+              {% endif %}
+              <button onclick="zoneAction('{{ z.port }}','radio_stop')" style="font-size:.75rem;padding:3px 8px">Radio stop</button>
+              <a href="http://{{ request.host.split(':')[0] }}:{{ z.port }}/" target="_blank" style="font-size:.75rem;padding:3px 8px;background:var(--card);border:1px solid var(--border);border-radius:4px;text-decoration:none;color:inherit">Dashboard →</a>
+            </div>
+            {% endif %}
+          </article>
+          {% endfor %}
+        </div>
+      </section>
+      {% endif %}
 
       <section class="section">
         <h2>Ausgabegerate</h2>
@@ -166,6 +226,24 @@
       };
     </script>
     <script src="{{ url_for('static', filename='js/audio-controller.js') }}"></script>
+    <script>
+    async function zoneAction(port, action) {
+      const base = `http://${location.hostname}:${port}`;
+      const map = {
+        bt_connect:    ['/api/audio/bt/connect', 'POST', {}],
+        bt_disconnect: ['/api/audio/bt/disconnect', 'POST', {}],
+        radio_stop:    ['/api/audio/radio/stop', 'POST', {}],
+      };
+      const [path, method, body] = map[action] || [];
+      if (!path) return;
+      try {
+        const r = await fetch(base + path, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+        const d = await r.json();
+        console.log(`Zone ${port} ${action}:`, d);
+        setTimeout(() => location.reload(), 2000);
+      } catch(e) { alert(`Fehler: ${e.message}`); }
+    }
+    </script>
 
     <style>
       #repo-update-widget{position:fixed;right:14px;bottom:14px;z-index:2000}

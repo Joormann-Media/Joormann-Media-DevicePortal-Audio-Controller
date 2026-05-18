@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Audio-Zonen Verwaltung</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/audio-controller.css') }}" />
+    <style>
+      .zone-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:16px; margin-top:16px; }
+      .zone-card { background:var(--card,#1e1e1e); border:1px solid var(--border,#333); border-radius:8px; padding:16px; }
+      .zone-card.online { border-left:3px solid var(--good,#4caf50); }
+      .zone-card.offline { border-left:3px solid var(--bad,#f44336); }
+      .zone-card h3 { margin:0 0 8px; font-size:1rem; display:flex; align-items:center; justify-content:space-between; }
+      .zone-badge { font-size:.72rem; padding:2px 8px; border-radius:12px; font-weight:600; }
+      .badge-online { background:#1a3a1a; color:#7ef07e; }
+      .badge-offline { background:#3a1a1a; color:#f07e7e; }
+      .zone-meta { font-size:.82rem; color:var(--muted,#888); margin:4px 0; font-family:monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .zone-actions { display:flex; gap:6px; margin-top:12px; flex-wrap:wrap; }
+      .zone-actions button, .zone-actions a { font-size:.8rem; padding:5px 10px; }
+      .form-card { background:var(--card,#1e1e1e); border:1px solid var(--border,#333); border-radius:8px; padding:20px; max-width:500px; }
+      .form-row { display:grid; grid-template-columns:140px 1fr; align-items:center; gap:8px; margin-bottom:10px; }
+      .form-row label { font-size:.85rem; color:var(--muted,#888); }
+      .form-row input { background:var(--input-bg,#2a2a2a); border:1px solid var(--border,#333); color:inherit; border-radius:4px; padding:6px 8px; font-size:.85rem; width:100%; box-sizing:border-box; }
+      .form-row .hint { font-size:.75rem; color:var(--muted,#666); grid-column:2; margin-top:-4px; }
+      .edit-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:100; align-items:center; justify-content:center; }
+      .edit-modal.open { display:flex; }
+      .edit-modal-box { background:var(--card,#1e1e1e); border:1px solid var(--border,#444); border-radius:8px; padding:24px; width:460px; max-width:95vw; }
+      .edit-modal-box h3 { margin:0 0 16px; }
+      #flash { padding:8px 12px; border-radius:4px; margin-bottom:12px; display:none; }
+      #flash.ok { background:#1a3a1a; color:#7ef07e; display:block; }
+      #flash.err { background:#3a1a1a; color:#f07e7e; display:block; }
+      .topbar { display:flex; align-items:center; justify-content:space-between; margin-bottom:20px; flex-wrap:wrap; gap:10px; }
+      .topbar h1 { margin:0; font-size:1.3rem; }
+    </style>
+  </head>
+  <body>
+    <main class="wrap">
+      <div class="topbar">
+        <div>
+          <h1>Audio-Zonen</h1>
+          <p style="margin:4px 0 0;font-size:.85rem;color:var(--muted,#888)">Zonen verwalten · BT-Lautsprecher · PipeWire-Sinks</p>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <a href="/audio" style="padding:6px 14px;background:var(--card);border:1px solid var(--border);border-radius:4px;text-decoration:none;color:inherit;font-size:.85rem">← Audio Control</a>
+          <button id="refreshBtn" class="primary">Aktualisieren</button>
+        </div>
+      </div>
+
+      <div id="flash"></div>
+
+      <div style="display:grid;grid-template-columns:1fr 380px;gap:24px;align-items:start">
+        <div>
+          <h2 style="margin:0 0 12px;font-size:1rem">Aktive Zonen</h2>
+          <div class="zone-grid" id="zoneGrid">
+            {% for z in zones %}
+            {% set live = z.live or {} %}
+            {% set st = live.status or {} %}
+            {% set is_up = live.ok %}
+            <div class="zone-card {{ 'online' if is_up else 'offline' }}" id="zc-{{ z.zone_name }}">
+              <h3>
+                {{ z.zone_name }}
+                <span class="zone-badge {{ 'badge-online' if is_up else 'badge-offline' }}">{{ 'online' if is_up else 'offline' }}</span>
+              </h3>
+              <div class="zone-meta" title="{{ z.sink_name }}">Sink: {{ z.sink_name or '@DEFAULT_SINK@' }}</div>
+              <div class="zone-meta">Port: {{ z.port }}</div>
+              {% if z.bt_address %}
+              <div class="zone-meta">BT: {{ z.bt_address }}</div>
+              {% endif %}
+              {% if is_up %}
+              <div class="zone-meta" style="color:var(--accent,#7eb3f0)">
+                ▶ {{ (st.active_source or 'idle') }}
+                {% if st.radio and st.radio.running and st.radio.stream_url %}
+                · <span title="{{ st.radio.stream_url }}" style="font-size:.75rem">{{ st.radio.stream_url[:40] }}{% if st.radio.stream_url|length > 40 %}…{% endif %}</span>
+                {% endif %}
+              </div>
+              {% endif %}
+              <div class="zone-actions">
+                <button onclick="startZone('{{ z.zone_name }}')" class="good">▶ Start</button>
+                <button onclick="stopZone('{{ z.zone_name }}')" class="bad">■ Stop</button>
+                {% if z.bt_address %}
+                <button onclick="btAction('{{ z.port }}','connect')">BT verbinden</button>
+                <button onclick="btAction('{{ z.port }}','disconnect')">BT trennen</button>
+                {% endif %}
+                <button onclick="openEdit('{{ z.zone_name }}','{{ z.port }}','{{ z.sink_name }}','{{ z.bt_address }}')" style="margin-left:auto">✏ Edit</button>
+                <button onclick="deleteZone('{{ z.zone_name }}')" class="bad">🗑</button>
+                {% if is_up %}
+                <a href="http://{{ request.host.split(':')[0] }}:{{ z.port }}/" target="_blank">Dashboard →</a>
+                {% endif %}
+              </div>
+            </div>
+            {% else %}
+            <div style="color:var(--muted,#888);font-size:.9rem;padding:20px 0">Keine Zonen konfiguriert.</div>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div>
+          <h2 style="margin:0 0 12px;font-size:1rem">Neue Zone anlegen</h2>
+          <div class="form-card">
+            <div class="form-row">
+              <label>Zone-Name *</label>
+              <div>
+                <input id="newName" placeholder="z.B. kueche" />
+                <div class="hint">Kleinbuchstaben, keine Leerzeichen</div>
+              </div>
+            </div>
+            <div class="form-row">
+              <label>Port *</label>
+              <div>
+                <input id="newPort" placeholder="z.B. 5099" type="number" />
+                <div class="hint">Freier Port für diese AudioPlayer-Instanz</div>
+              </div>
+            </div>
+            <div class="form-row">
+              <label>Sink-Name</label>
+              <div>
+                <input id="newSink" placeholder="z.B. bluez_output.XX_XX_XX.1" />
+                <div class="hint">pactl list sinks short → Name kopieren</div>
+              </div>
+            </div>
+            <div class="form-row">
+              <label>BT-Adresse</label>
+              <div>
+                <input id="newBt" placeholder="z.B. 10:28:74:9B:B2:C9" />
+                <div class="hint">MAC des Bluetooth-Lautsprechers</div>
+              </div>
+            </div>
+            <div style="margin-top:16px;display:flex;gap:8px">
+              <button class="primary" onclick="createZone()">Zone anlegen</button>
+              <button onclick="detectSinks()">Sinks erkennen</button>
+            </div>
+            <div id="sinkList" style="margin-top:10px;font-size:.8rem;font-family:monospace;white-space:pre-wrap;color:var(--muted,#888);display:none"></div>
+          </div>
+
+          <div style="margin-top:20px">
+            <h2 style="margin:0 0 12px;font-size:1rem">Verfügbare PipeWire-Sinks</h2>
+            <div id="liveSinks" style="font-size:.8rem;font-family:monospace;background:var(--card);border:1px solid var(--border);border-radius:6px;padding:12px;white-space:pre-wrap;color:var(--muted,#aaa)">Lädt…</div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Edit Modal -->
+    <div class="edit-modal" id="editModal">
+      <div class="edit-modal-box">
+        <h3>Zone bearbeiten: <span id="editZoneName"></span></h3>
+        <input type="hidden" id="editName" />
+        <div class="form-row">
+          <label>Port *</label>
+          <input id="editPort" type="number" />
+        </div>
+        <div class="form-row">
+          <label>Sink-Name</label>
+          <input id="editSink" placeholder="leer = @DEFAULT_SINK@" />
+        </div>
+        <div class="form-row">
+          <label>BT-Adresse</label>
+          <input id="editBt" placeholder="z.B. 10:28:74:9B:B2:C9" />
+        </div>
+        <div style="display:flex;gap:8px;margin-top:16px">
+          <button class="primary" onclick="saveEdit()">Speichern</button>
+          <button onclick="closeEdit()">Abbrechen</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+    const flash = (msg, ok=true) => {
+      const el = document.getElementById('flash');
+      el.textContent = msg; el.className = ok ? 'ok' : 'err';
+      setTimeout(() => { el.style.display='none'; }, 4000);
+    };
+
+    async function api(url, method='GET', body=null) {
+      const opts = { method, headers: {'Content-Type':'application/json'} };
+      if (body) opts.body = JSON.stringify(body);
+      const r = await fetch(url, opts);
+      return r.json();
+    }
+
+    async function createZone() {
+      const name = document.getElementById('newName').value.trim();
+      const port = document.getElementById('newPort').value.trim();
+      const sink = document.getElementById('newSink').value.trim();
+      const bt   = document.getElementById('newBt').value.trim();
+      if (!name || !port) { flash('Zone-Name und Port sind Pflicht', false); return; }
+      const r = await api('/api/audio/zones', 'POST', {zone_name:name, port, sink_name:sink, bt_address:bt});
+      if (r.ok) { flash(`Zone '${name}' angelegt`); setTimeout(() => location.reload(), 1200); }
+      else flash(r.error || 'Fehler', false);
+    }
+
+    async function deleteZone(name) {
+      if (!confirm(`Zone '${name}' wirklich löschen?`)) return;
+      const r = await api(`/api/audio/zones/${name}`, 'DELETE');
+      if (r.ok) { flash(`Zone '${name}' gelöscht`); setTimeout(() => location.reload(), 1000); }
+      else flash(r.error || 'Fehler', false);
+    }
+
+    async function startZone(name) {
+      flash(`Zone '${name}' wird gestartet…`);
+      const r = await api(`/api/audio/zones/${name}/start`, 'POST');
+      flash(r.ok ? `Zone '${name}' gestartet` : (r.stderr || r.error || 'Fehler'), r.ok);
+      if (r.ok) setTimeout(() => location.reload(), 2000);
+    }
+
+    async function stopZone(name) {
+      const r = await api(`/api/audio/zones/${name}/stop`, 'POST');
+      flash(r.ok ? `Zone '${name}' gestoppt` : (r.error || 'Fehler'), r.ok);
+      if (r.ok) setTimeout(() => location.reload(), 1500);
+    }
+
+    async function btAction(port, action) {
+      const base = `http://${location.hostname}:${port}`;
+      const path = action === 'connect' ? '/api/audio/bt/connect' : '/api/audio/bt/disconnect';
+      try {
+        const r = await api(base + path, 'POST', {});
+        flash(r.ok ? `BT ${action} gesendet` : (r.message || 'Fehler'), r.ok);
+        setTimeout(() => location.reload(), 3000);
+      } catch(e) { flash(e.message, false); }
+    }
+
+    async function detectSinks() {
+      try {
+        const r = await fetch('/api/audio/outputs');
+        const d = await r.json();
+        const sinks = (d.data || d).sinks || d.outputs || [];
+        const box = document.getElementById('sinkList');
+        if (!sinks.length) { box.textContent = 'Keine Sinks gefunden'; box.style.display='block'; return; }
+        box.textContent = sinks.map(s => s.name || s.sink_name || JSON.stringify(s)).join('\n');
+        box.style.display = 'block';
+      } catch(e) { flash(e.message, false); }
+    }
+
+    function openEdit(name, port, sink, bt) {
+      document.getElementById('editName').value = name;
+      document.getElementById('editZoneName').textContent = name;
+      document.getElementById('editPort').value = port;
+      document.getElementById('editSink').value = sink;
+      document.getElementById('editBt').value = bt;
+      document.getElementById('editModal').classList.add('open');
+    }
+
+    function closeEdit() { document.getElementById('editModal').classList.remove('open'); }
+
+    async function saveEdit() {
+      const name = document.getElementById('editName').value;
+      const port = document.getElementById('editPort').value.trim();
+      const sink = document.getElementById('editSink').value.trim();
+      const bt   = document.getElementById('editBt').value.trim();
+      const r = await api(`/api/audio/zones/${name}`, 'PUT', {port, sink_name:sink, bt_address:bt});
+      if (r.ok) { flash(`Zone '${name}' gespeichert`); closeEdit(); setTimeout(() => location.reload(), 1000); }
+      else flash(r.error || 'Fehler', false);
+    }
+
+    async function loadLiveSinks() {
+      try {
+        const r = await fetch('/api/audio/outputs');
+        const d = await r.json();
+        const sinks = ((d.data || d).sinks || []);
+        const el = document.getElementById('liveSinks');
+        if (!sinks.length) { el.textContent = '(keine Sinks via API gefunden)'; return; }
+        el.textContent = sinks.map(s => `${s.is_default ? '* ' : '  '}${s.name || '-'}\n    ${s.description || ''}`).join('\n');
+      } catch(e) { document.getElementById('liveSinks').textContent = 'Fehler: ' + e.message; }
+    }
+
+    document.getElementById('refreshBtn').onclick = () => location.reload();
+    document.getElementById('editModal').addEventListener('click', e => { if(e.target === e.currentTarget) closeEdit(); });
+    loadLiveSinks();
+    </script>
+  </body>
+</html>
