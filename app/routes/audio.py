@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -65,6 +66,17 @@ def _fetch_zone_status(port: str) -> dict[str, Any]:
             data = json.loads(r.read().decode())
         inner = data.get("data") or data
         return {"ok": True, "status": inner}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def _zone_api_call(port: str, path: str, method: str = "POST", body: dict | None = None) -> dict[str, Any]:
+    url = f"http://127.0.0.1:{port}{path}"
+    data = json.dumps(body or {}).encode()
+    req = Request(url, data=data, headers={"Content-Type": "application/json", "User-Agent": "AudioController/1.0"}, method=method)
+    try:
+        with urlopen(req, timeout=6) as r:
+            return json.loads(r.read().decode())
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
@@ -571,3 +583,104 @@ def api_events():
             time.sleep(2)
 
     return Response(stream(), mimetype="text/event-stream", headers={"Cache-Control": "no-cache"})
+
+
+@audio_bp.post("/api/audio/broadcast")
+def api_broadcast():
+    body = request.get_json(silent=True) or {}
+    stream_url = str(body.get("stream_url") or "").strip()
+    zone_names = body.get("zone_names") if isinstance(body.get("zone_names"), list) else []
+    sync = bool(body.get("sync", True))
+
+    if not stream_url:
+        return jsonify({"ok": False, "error": "stream_url fehlt"}), 400
+
+    zones = _load_zone_configs()
+    targets = []
+    for z in zones:
+        if zone_names and z["zone_name"] not in zone_names:
+            continue
+        if not z.get("port"):
+            continue
+        live = _fetch_zone_status(z["port"])
+        if live.get("ok"):
+            targets.append(z)
+
+    if not targets:
+        return jsonify({"ok": False, "error": "Keine erreichbaren Zonen gefunden"}), 404
+
+    if sync:
+        stop_threads = [threading.Thread(target=_zone_api_call, args=(z["port"], "/api/audio/radio/stop", "POST")) for z in targets]
+        for t in stop_threads:
+            t.start()
+        for t in stop_threads:
+            t.join(timeout=4)
+        time.sleep(0.15)
+
+    results: dict[str, Any] = {}
+
+    def _start(z: dict[str, Any]) -> None:
+        results[z["zone_name"]] = _zone_api_call(z["port"], "/api/audio/radio/start", "POST", {"stream_url": stream_url})
+
+    start_threads = [threading.Thread(target=_start, args=(z,)) for z in targets]
+    for t in start_threads:
+        t.start()
+    for t in start_threads:
+        t.join(timeout=10)
+
+    ok = any(r.get("ok") for r in results.values())
+    return jsonify({"ok": ok, "stream_url": stream_url, "zones": results, "synced": sync, "target_count": len(targets)})
+
+
+@audio_bp.post("/api/audio/broadcast/stop")
+def api_broadcast_stop():
+    body = request.get_json(silent=True) or {}
+    zone_names = body.get("zone_names") if isinstance(body.get("zone_names"), list) else []
+
+    zones = _load_zone_configs()
+    results: dict[str, Any] = {}
+    for z in zones:
+        if zone_names and z["zone_name"] not in zone_names:
+            continue
+        if not z.get("port"):
+            continue
+        live = _fetch_zone_status(z["port"])
+        if live.get("ok"):
+            results[z["zone_name"]] = _zone_api_call(z["port"], "/api/audio/radio/stop", "POST")
+
+    return jsonify({"ok": True, "stopped": list(results.keys()), "results": results})
+
+
+@audio_bp.get("/api/audio/broadcast/status")
+def api_broadcast_status():
+    zones = _load_zone_configs()
+    statuses: list[dict[str, Any]] = []
+    for z in zones:
+        live = _fetch_zone_status(z.get("port", ""))
+        st = live.get("status") if isinstance(live.get("status"), dict) else {}
+        statuses.append({
+            "zone_name": z["zone_name"],
+            "port": z["port"],
+            "online": live.get("ok", False),
+            "active_source": st.get("active_source", "idle"),
+            "radio_url": (st.get("radio") or {}).get("stream_url"),
+            "radio_running": bool((st.get("radio") or {}).get("running")),
+            "volume_percent": st.get("volume_percent"),
+        })
+    playing = [s for s in statuses if s["radio_running"]]
+    urls = list({s["radio_url"] for s in playing if s["radio_url"]})
+    return jsonify({"ok": True, "zones": statuses, "broadcast_active": len(urls) == 1 and len(playing) > 1, "stream_urls": urls})
+
+
+@audio_bp.post("/api/audio/zones/<zone_name>/output/switch")
+def api_zone_output_switch(zone_name: str):
+    body = request.get_json(silent=True) or {}
+    sink_name = str(body.get("sink_name") or "").strip()
+    if not sink_name:
+        return jsonify({"ok": False, "error": "sink_name fehlt"}), 400
+    zones = _load_zone_configs()
+    zone = next((z for z in zones if z["zone_name"] == zone_name), None)
+    if not zone or not zone.get("port"):
+        return jsonify({"ok": False, "error": f"Zone '{zone_name}' nicht gefunden oder offline"}), 404
+    result = _zone_api_call(zone["port"], "/api/audio/output/switch", "POST", {"sink_name": sink_name})
+    return jsonify(result)

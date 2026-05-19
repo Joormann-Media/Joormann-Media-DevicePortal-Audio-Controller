@@ -41,6 +41,30 @@
       {% if zones %}
       <section class="section">
         <h2>Audio-Zonen</h2>
+
+        <!-- Broadcast Panel -->
+        <div id="broadcastPanel" style="background:var(--card,#1e1e1e);border:1px solid var(--border,#333);border-radius:8px;padding:14px;margin-bottom:16px">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <strong style="font-size:.9rem;white-space:nowrap">📡 Broadcast</strong>
+            <input id="broadcastUrl" placeholder="Stream-URL (http://...)" style="flex:1;min-width:200px;background:var(--input-bg,#2a2a2a);border:1px solid var(--border,#333);color:inherit;border-radius:4px;padding:5px 8px;font-size:.82rem" />
+            <div id="broadcastZones" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+              {% for z in zones %}
+              <label style="display:flex;align-items:center;gap:4px;font-size:.82rem;cursor:pointer">
+                <input type="checkbox" class="bc-zone" value="{{ z.zone_name }}" {% if z.live and z.live.ok %}checked{% endif %} {% if not z.live or not z.live.ok %}disabled title="Zone offline"{% endif %} />
+                {{ z.zone_name }}
+              </label>
+              {% endfor %}
+            </div>
+            <label style="display:flex;align-items:center;gap:4px;font-size:.82rem;cursor:pointer">
+              <input type="checkbox" id="broadcastSync" checked /> Sync
+            </label>
+            <button onclick="startBroadcast()" class="primary" style="font-size:.82rem;padding:5px 12px;white-space:nowrap">▶ Alle starten</button>
+            <button onclick="stopBroadcast()" class="bad" style="font-size:.82rem;padding:5px 12px;white-space:nowrap">■ Alle stoppen</button>
+          </div>
+          <div id="broadcastStatus" style="margin-top:6px;font-size:.78rem;color:var(--muted,#888)"></div>
+        </div>
+
+        <!-- Zone Cards -->
         <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px">
           {% for z in zones %}
           {% set live = z.live or {} %}
@@ -59,7 +83,7 @@
             <div style="font-size:.8rem;color:var(--muted,#888);margin-bottom:6px;font-family:monospace">Port {{ z.port }}</div>
             <div style="font-size:.82rem;margin-bottom:4px">
               <span style="color:var(--muted,#888)">Sink:</span>
-              <span style="font-family:monospace;font-size:.78rem">{{ z.sink_name or '@DEFAULT_SINK@' }}</span>
+              <span style="font-family:monospace;font-size:.78rem" id="sink-{{ z.zone_name }}">{{ z.sink_name or '@DEFAULT_SINK@' }}</span>
             </div>
             {% if z.bt_address %}
             <div style="font-size:.82rem;margin-bottom:4px">
@@ -82,7 +106,14 @@
               <div style="font-size:.75rem;color:var(--muted,#888);font-family:monospace;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ radio.stream_url }}">{{ radio.stream_url }}</div>
               {% endif %}
             </div>
-            <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
+
+            <!-- Output Switch -->
+            <div style="margin-top:8px;display:flex;gap:4px;align-items:center">
+              <input id="switchSink-{{ z.zone_name }}" placeholder="Sink-Name…" style="flex:1;background:var(--input-bg,#2a2a2a);border:1px solid var(--border,#333);color:inherit;border-radius:4px;padding:3px 6px;font-size:.75rem" title="Sink-Namen eingeben (pactl list sinks short)" />
+              <button onclick="switchOutput('{{ z.zone_name }}')" style="font-size:.75rem;padding:3px 8px;white-space:nowrap" title="Laufende Wiedergabe nahtlos auf diesen Ausgang verschieben">→ Switch</button>
+            </div>
+
+            <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
               {% if z.bt_address %}
               <button onclick="zoneAction('{{ z.port }}','bt_connect')" style="font-size:.75rem;padding:3px 8px" class="good">BT verbinden</button>
               <button onclick="zoneAction('{{ z.port }}','bt_disconnect')" style="font-size:.75rem;padding:3px 8px" class="bad">BT trennen</button>
@@ -227,22 +258,86 @@
     </script>
     <script src="{{ url_for('static', filename='js/audio-controller.js') }}"></script>
     <script>
-    async function zoneAction(port, action) {
-      const base = `http://${location.hostname}:${port}`;
-      const map = {
-        bt_connect:    ['/api/audio/bt/connect', 'POST', {}],
-        bt_disconnect: ['/api/audio/bt/disconnect', 'POST', {}],
-        radio_stop:    ['/api/audio/radio/stop', 'POST', {}],
-      };
-      const [path, method, body] = map[action] || [];
-      if (!path) return;
-      try {
-        const r = await fetch(base + path, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
-        const d = await r.json();
-        console.log(`Zone ${port} ${action}:`, d);
-        setTimeout(() => location.reload(), 2000);
-      } catch(e) { alert(`Fehler: ${e.message}`); }
+async function zoneAction(port, action) {
+  const base = `http://${location.hostname}:${port}`;
+  const map = {
+    bt_connect:    ['/api/audio/bt/connect', 'POST', {}],
+    bt_disconnect: ['/api/audio/bt/disconnect', 'POST', {}],
+    radio_stop:    ['/api/audio/radio/stop', 'POST', {}],
+  };
+  const [path, method, body] = map[action] || [];
+  if (!path) return;
+  try {
+    const r = await fetch(base + path, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const d = await r.json();
+    console.log(`Zone ${port} ${action}:`, d);
+    setTimeout(() => location.reload(), 2000);
+  } catch(e) { alert(`Fehler: ${e.message}`); }
+}
+
+async function switchOutput(zoneName) {
+  const sinkInput = document.getElementById(`switchSink-${zoneName}`);
+  const sink = (sinkInput?.value || '').trim();
+  if (!sink) { alert('Bitte Sink-Namen eingeben (z.B. bluez_output.XX_XX.1)'); return; }
+  const bcast = document.getElementById('broadcastStatus');
+  if (bcast) bcast.textContent = `Wechsle Ausgang für Zone ${zoneName}…`;
+  try {
+    const r = await fetch(`/api/audio/zones/${zoneName}/output/switch`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({sink_name: sink}),
+    });
+    const d = await r.json();
+    if (bcast) bcast.textContent = d.ok ? `✓ Zone ${zoneName} → ${sink} (${d.moved ?? 0} stream(s) verschoben)` : `✗ ${d.error || 'Fehler'}`;
+    if (d.ok) {
+      const sinkLabel = document.getElementById(`sink-${zoneName}`);
+      if (sinkLabel) sinkLabel.textContent = sink;
     }
+  } catch(e) {
+    if (bcast) bcast.textContent = `✗ ${e.message}`;
+  }
+}
+
+async function startBroadcast() {
+  const url = (document.getElementById('broadcastUrl')?.value || '').trim();
+  if (!url) { alert('Stream-URL eingeben'); return; }
+  const checked = [...document.querySelectorAll('.bc-zone:checked')].map(c => c.value);
+  if (!checked.length) { alert('Mindestens eine Zone auswählen'); return; }
+  const sync = document.getElementById('broadcastSync')?.checked ?? true;
+  const bcast = document.getElementById('broadcastStatus');
+  if (bcast) bcast.textContent = `Starte Broadcast auf ${checked.join(', ')}…`;
+  try {
+    const r = await fetch('/api/audio/broadcast', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({stream_url: url, zone_names: checked, sync}),
+    });
+    const d = await r.json();
+    const ok = Object.values(d.zones || {}).filter(z => z.ok).length;
+    if (bcast) bcast.textContent = d.ok ? `✓ Broadcast läuft auf ${ok}/${checked.length} Zone(n)` : `✗ ${d.error || 'Fehler'}`;
+    setTimeout(() => location.reload(), 3000);
+  } catch(e) {
+    if (bcast) bcast.textContent = `✗ ${e.message}`;
+  }
+}
+
+async function stopBroadcast() {
+  const checked = [...document.querySelectorAll('.bc-zone:checked')].map(c => c.value);
+  const bcast = document.getElementById('broadcastStatus');
+  if (bcast) bcast.textContent = 'Stoppe…';
+  try {
+    const r = await fetch('/api/audio/broadcast/stop', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({zone_names: checked.length ? checked : []}),
+    });
+    const d = await r.json();
+    if (bcast) bcast.textContent = `✓ Gestoppt: ${(d.stopped || []).join(', ') || 'keine'}`;
+    setTimeout(() => location.reload(), 2000);
+  } catch(e) {
+    if (bcast) bcast.textContent = `✗ ${e.message}`;
+  }
+}
     </script>
 
     <style>
