@@ -6,26 +6,22 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SYSTEMD_DIR="$PROJECT_ROOT/systemd"
 SERVICE_TEMPLATE="$SYSTEMD_DIR/joormann-media-audio-controller.service"
 SERVICE_NAME="joormann-media-audio-controller.service"
-SERVICE_PATH="/etc/systemd/system/$SERVICE_NAME"
-SERVICE_USER="${1:-${SUDO_USER:-$USER}}"
+USER_SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+SERVICE_PATH="$USER_SYSTEMD_DIR/$SERVICE_NAME"
 
 if [[ ! -f "$SERVICE_TEMPLATE" ]]; then
   echo "Service-Template fehlt: $SERVICE_TEMPLATE"
   exit 1
 fi
-if [[ -z "$SERVICE_USER" ]]; then
-  echo "Service-User fehlt."
-  exit 1
-fi
 
-TMP_UNIT="$(mktemp)"
-trap 'rm -f "$TMP_UNIT"' EXIT
-sed "s|__SERVICE_USER__|$SERVICE_USER|g" "$SERVICE_TEMPLATE" > "$TMP_UNIT"
+mkdir -p "$USER_SYSTEMD_DIR"
 
-sudo install -m 644 "$TMP_UNIT" "$SERVICE_PATH"
-sudo systemctl daemon-reload
+sed "s|__PROJECT_ROOT__|$PROJECT_ROOT|g" "$SERVICE_TEMPLATE" > "$SERVICE_PATH"
+chmod 644 "$SERVICE_PATH"
+
+systemctl --user daemon-reload
 
 echo "Installiert: $SERVICE_NAME"
-echo "Service-User: $SERVICE_USER"
+echo "Pfad:        $SERVICE_PATH"
 echo "Aktivieren:  $SCRIPT_DIR/service-enable.sh"
 echo "Starten:     $SCRIPT_DIR/service-start.sh"

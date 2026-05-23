@@ -8,7 +8,10 @@ Alle Endpunkte folgen dem bestehenden Muster aus audio.py:
 """
 from __future__ import annotations
 
-from flask import Blueprint, jsonify, request
+import json
+import queue
+
+from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 from app.services.bluetooth_service import BluetoothService
 
@@ -77,11 +80,52 @@ def api_bt_scan_stop():
 
 @bluetooth_bp.get("/api/bluetooth/scan/results")
 def api_bt_scan_results():
-    """
-    Aktueller Scan-Status und alle bisher gefundenen Geräte.
-    Wird alle 2 Sekunden vom Frontend abgefragt.
-    """
+    """Aktueller Scan-Status und alle bisher gefundenen Geräte (Polling-Fallback)."""
     return jsonify(_bt.get_scan_status())
+
+
+@bluetooth_bp.get("/api/bluetooth/stream")
+def api_bt_stream():
+    """
+    Server-Sent Events (SSE) Stream für Echtzeit-Bluetooth-Events.
+
+    Event-Typen:
+      scan_status   – Scan gestartet/gestoppt/Fortschritt
+      scan_device   – Gerät gefunden oder aktualisiert (während Scan)
+      action_progress – Zwischenschritt bei pair/connect
+      action_done   – Aktion abgeschlossen (pair/connect/disconnect/remove)
+
+    Der Client verbindet sich einmalig; der Server pusht Events ohne Polling.
+    """
+    def _generate():
+        q = _bt.subscribe()
+        try:
+            # Initialen Zustand senden
+            init = _bt.get_scan_status()
+            yield f"event: scan_status\ndata: {json.dumps(init)}\n\n"
+
+            while True:
+                try:
+                    event = q.get(timeout=20)
+                    payload = json.dumps(event["data"], ensure_ascii=False)
+                    yield f"event: {event['type']}\ndata: {payload}\n\n"
+                except queue.Empty:
+                    # Heartbeat verhindert Proxy-Timeouts
+                    yield ": heartbeat\n\n"
+        except GeneratorExit:
+            pass
+        finally:
+            _bt.unsubscribe(q)
+
+    return Response(
+        stream_with_context(_generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control":       "no-cache",
+            "X-Accel-Buffering":   "no",
+            "Connection":          "keep-alive",
+        },
+    )
 
 
 # ─── Bekannte Geräte ─────────────────────────────────────────────────────────

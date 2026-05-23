@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import pty
+import queue as _queue
 import re
 import select as _select
 import subprocess
@@ -70,6 +71,41 @@ class BluetoothService:
         self._scan_start_time: float = 0.0
         self._scan_duration: int = 0
         self._scan_thread: Optional[threading.Thread] = None
+        # SSE: Subscriber-Queues für Echtzeit-Events
+        self._subscribers: List[_queue.Queue] = []
+        self._sub_lock = threading.Lock()
+
+    # ─── SSE Event-Bus ──────────────────────────────────────────────────────────
+
+    def subscribe(self) -> "_queue.Queue[Dict[str, Any]]":
+        """Registriert einen neuen SSE-Subscriber und gibt seine Queue zurück."""
+        q: _queue.Queue[Dict[str, Any]] = _queue.Queue(maxsize=100)
+        with self._sub_lock:
+            self._subscribers.append(q)
+        return q
+
+    def unsubscribe(self, q: "_queue.Queue[Dict[str, Any]]") -> None:
+        """Entfernt einen Subscriber."""
+        with self._sub_lock:
+            try:
+                self._subscribers.remove(q)
+            except ValueError:
+                pass
+
+    def _emit(self, event_type: str, data: Dict[str, Any]) -> None:
+        """Sendet ein Event an alle Subscriber. Volle Queues werden entfernt."""
+        with self._sub_lock:
+            dead = []
+            for q in self._subscribers:
+                try:
+                    q.put_nowait({"type": event_type, "data": data})
+                except _queue.Full:
+                    dead.append(q)
+            for q in dead:
+                try:
+                    self._subscribers.remove(q)
+                except ValueError:
+                    pass
 
     # ─── Private Hilfsfunktionen ─────────────────────────────────────────────
 
@@ -357,6 +393,12 @@ class BluetoothService:
         self._btctl(["pairable",     "on"],  timeout=5)
         self._btctl(["discoverable", "on"],  timeout=5)
 
+        self._emit("scan_status", {
+            "scanning": True, "elapsed_sec": 0,
+            "remaining_sec": duration_sec, "duration_sec": duration_sec,
+            "devices_found": 0,
+        })
+
         thread = threading.Thread(
             target=self._scan_thread_func,
             args=(duration_sec,),
@@ -378,6 +420,7 @@ class BluetoothService:
                 return {"ok": True, "message": "Kein aktiver Scan"}
             self._scan_active = False
         self._btctl(["scan", "off"], timeout=5)
+        self._emit("scan_status", self.get_scan_status())
         return {"ok": True, "message": "Scan gestoppt"}
 
     def get_scan_status(self) -> Dict[str, Any]:
@@ -406,21 +449,34 @@ class BluetoothService:
 
     def _scan_thread_func(self, duration_sec: int) -> None:
         """
-        Hintergrund-Thread: Führt 'bluetoothctl --timeout N scan on' aus.
-        bluetoothctl gibt [NEW]/[CHG] Device-Zeilen für entdeckte Geräte aus.
-        Nach dem Scan werden bekannte Geräte mit Detailinfos angereichert.
+        Hintergrund-Thread: liest bluetoothctl-Ausgabe zeilenweise (Echtzeit)
+        und emittiert SSE-Events für neue/aktualisierte Geräte und Statusänderungen.
         """
+        _last_status_emit = time.monotonic()
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 ["bluetoothctl", "--timeout", str(duration_sec + 2), "scan", "on"],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
-                timeout=duration_sec + 6,
+                bufsize=1,
             )
-            output = _strip_ansi(result.stdout + result.stderr)
-            self._parse_scan_output(output)
-        except subprocess.TimeoutExpired:
-            logger.debug("Bluetooth-Scan regulär abgelaufen")
+            for raw_line in proc.stdout:  # type: ignore[union-attr]
+                with self._lock:
+                    active = self._scan_active
+                if not active:
+                    proc.terminate()
+                    break
+                self._parse_scan_line(_strip_ansi(raw_line.strip()))
+                # Periodisches Status-Emit (~jede Sekunde) für den Fortschrittsbalken
+                now = time.monotonic()
+                if now - _last_status_emit >= 1.0:
+                    _last_status_emit = now
+                    self._emit("scan_status", self.get_scan_status())
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
         except FileNotFoundError:
             logger.error("bluetoothctl nicht gefunden – BlueZ installieren")
         except Exception as exc:
@@ -428,8 +484,6 @@ class BluetoothService:
         finally:
             with self._lock:
                 self._scan_active = False
-
-            # Scan stoppen (Sicherheitsnetz)
             try:
                 subprocess.run(
                     ["bluetoothctl", "scan", "off"],
@@ -438,56 +492,63 @@ class BluetoothService:
                 )
             except Exception:
                 pass
-
-            # Gerätecache mit 'bluetoothctl devices' + info anreichern
+            # Geräte mit Detailinfos anreichern, dann finales Status-Event
             self._enrich_scan_results()
+            self._emit("scan_status", self.get_scan_status())
 
-    def _parse_scan_output(self, output: str) -> None:
-        """Verarbeitet die Rohausgabe des Scan-Subprozesses."""
-        for line in output.splitlines():
-            line = line.strip()
+    def _parse_scan_line(self, line: str) -> None:
+        """Verarbeitet eine einzelne Zeile aus der Scan-Ausgabe in Echtzeit.
+        Emittiert 'scan_device' sobald ein Gerät neu erscheint oder sich ändert."""
+        emit_dev: Optional[Dict[str, Any]] = None
 
-            m = _RE_NEW_DEV.search(line)
-            if m:
-                mac  = m.group(1).upper()
-                name = m.group(2).strip()
-                with self._lock:
-                    if mac not in self._scan_devices:
-                        self._scan_devices[mac] = {
-                            "mac":         mac,
-                            "name":        name or mac,
-                            "rssi":        None,
-                            "device_type": "Unbekannt",
-                            "icon":        "",
-                            "paired":      False,
-                            "connected":   False,
-                            "trusted":     False,
-                        }
-                continue
+        m = _RE_NEW_DEV.search(line)
+        if m:
+            mac  = m.group(1).upper()
+            name = m.group(2).strip()
+            with self._lock:
+                if mac not in self._scan_devices:
+                    self._scan_devices[mac] = {
+                        "mac": mac, "name": name or mac, "rssi": None,
+                        "device_type": "Unbekannt", "icon": "",
+                        "paired": False, "connected": False, "trusted": False,
+                    }
+                    emit_dev = dict(self._scan_devices[mac])
+            if emit_dev:
+                self._emit("scan_device", emit_dev)
+            return
 
-            m = _RE_CHG_RSSI.search(line)
-            if m:
-                mac, rssi = m.group(1).upper(), int(m.group(2))
-                with self._lock:
-                    if mac in self._scan_devices:
-                        self._scan_devices[mac]["rssi"] = rssi
-                continue
+        m = _RE_CHG_RSSI.search(line)
+        if m:
+            mac, rssi = m.group(1).upper(), int(m.group(2))
+            with self._lock:
+                if mac in self._scan_devices:
+                    self._scan_devices[mac]["rssi"] = rssi
+                    emit_dev = dict(self._scan_devices[mac])
+            if emit_dev:
+                self._emit("scan_device", emit_dev)
+            return
 
-            m = _RE_CHG_NAME.search(line)
-            if m:
-                mac, name = m.group(1).upper(), m.group(2).strip()
-                with self._lock:
-                    if mac in self._scan_devices and name:
-                        self._scan_devices[mac]["name"] = name
-                continue
+        m = _RE_CHG_NAME.search(line)
+        if m:
+            mac, name = m.group(1).upper(), m.group(2).strip()
+            with self._lock:
+                if mac in self._scan_devices and name:
+                    self._scan_devices[mac]["name"] = name
+                    emit_dev = dict(self._scan_devices[mac])
+            if emit_dev:
+                self._emit("scan_device", emit_dev)
+            return
 
-            m = _RE_CHG_ICON.search(line)
-            if m:
-                mac, icon = m.group(1).upper(), m.group(2).strip()
-                with self._lock:
-                    if mac in self._scan_devices and icon:
-                        self._scan_devices[mac]["icon"]        = icon
-                        self._scan_devices[mac]["device_type"] = _icon_to_type_label(icon)
+        m = _RE_CHG_ICON.search(line)
+        if m:
+            mac, icon = m.group(1).upper(), m.group(2).strip()
+            with self._lock:
+                if mac in self._scan_devices and icon:
+                    self._scan_devices[mac]["icon"]        = icon
+                    self._scan_devices[mac]["device_type"] = _icon_to_type_label(icon)
+                    emit_dev = dict(self._scan_devices[mac])
+            if emit_dev:
+                self._emit("scan_device", emit_dev)
 
     def _enrich_scan_results(self) -> None:
         """
@@ -520,6 +581,7 @@ class BluetoothService:
             try:
                 _, info_out = self._btctl(["info", mac], timeout=5)
                 info = self._parse_info_block(_strip_ansi(info_out))
+                emit_dev: Optional[Dict[str, Any]] = None
                 with self._lock:
                     if mac in self._scan_devices:
                         dev = self._scan_devices[mac]
@@ -533,6 +595,9 @@ class BluetoothService:
                         dev["trusted"]   = info.get("trusted",   False)
                         if info.get("rssi") is not None:
                             dev["rssi"] = info["rssi"]
+                        emit_dev = dict(dev)
+                if emit_dev:
+                    self._emit("scan_device", emit_dev)
             except Exception as exc:
                 logger.debug("Gerät %s – Info-Fehler: %s", mac, exc)
 
@@ -579,18 +644,16 @@ class BluetoothService:
 
     def _pair_interactive(self, mac: str) -> str:
         """
-        Vollständig interaktiver PTY-basierter Pairing-Ablauf.
+        PTY-basierter Pairing-Ablauf: pair → trust → connect.
 
-        Warum nicht _btctl_session?
-        'bluetoothctl pair <mac>' ist asynchron: der Prompt '[bluetooth]# '
-        erscheint sofort nach dem Start des Pairings, während das eigentliche
-        Pairing-Protokoll noch läuft.  Wenn wir den Prompt als Abbruchbedingung
-        nutzen (wie in _btctl_session), senden wir 'trust' und 'connect' zu früh
-        – die Folgebefehle landen im falschen Kontext oder als PIN-Eingabe.
+        Agent-Setup: Wir registrieren explizit 'NoInputNoOutput' — der richtige
+        Typ für BT-Lautsprecher/Headsets ("Just Works"-Pairing).  Falls BlueZ
+        bereits einen Agent auto-registriert hat, melden wir ihn kurz ab und
+        registrieren neu.  Fehler beim default-agent werden ignoriert, da BlueZ
+        ihn oft automatisch setzt.
 
-        Diese Methode wartet beim pair-Schritt nur auf semantische Abschluss-
-        muster ("Pairing successful", "Failed to pair", "Paired: yes") und
-        reagiert interaktiv auf PIN- und Bestätigungs-Aufforderungen.
+        Aufrufbedingung: Kein aktiver Scan-Prozess (Scan muss vorher gestoppt
+        werden), damit kein fremder Agent den Pairable-Status zurücksetzt.
         """
         master_fd, slave_fd = pty.openpty()
         proc = subprocess.Popen(
@@ -608,7 +671,6 @@ class BluetoothService:
             os.write(master_fd, (text + "\n").encode())
 
         def _read(t: float = 0.15) -> bytes:
-            """Einen Chunk lesen (nicht-blockierend mit Timeout)."""
             nonlocal buf
             r, _, _ = _select.select([master_fd], [], [], t)
             if r:
@@ -626,25 +688,14 @@ class BluetoothService:
             timeout: float,
             respond: Optional[Dict[str, str]] = None,
         ) -> str:
-            """
-            Liest vom PTY, bis ein Muster aus done_patterns im neuen Output
-            erscheint oder der Timeout abläuft.
-
-            respond: {auslöser: antwort} – wenn auslöser erkannt, wird antwort
-            gesendet und weiter gelesen (einmalig pro Auslöser).
-            Gibt den neuen Output-String (seit Aufruf) zurück.
-            """
             nonlocal buf
-            baseline    = len(buf)
-            end         = time.monotonic() + timeout
+            baseline   = len(buf)
+            end        = time.monotonic() + timeout
             responded: set = set()
-
             while time.monotonic() < end:
                 _read(0.1)
                 new = _strip_ansi(buf[baseline:].decode("utf-8", errors="replace"))
                 nl  = new.lower()
-
-                # Interaktive Antworten (z. B. PIN-Eingabe)
                 if respond:
                     for trigger, reply in respond.items():
                         if trigger.lower() in nl and trigger not in responded:
@@ -652,63 +703,60 @@ class BluetoothService:
                             time.sleep(0.1)
                             logger.info("Pairing: '%s' erkannt → sende '%s'", trigger, reply)
                             _send(reply)
-
-                # Abbruchbedingungen prüfen
                 for p in done_patterns:
                     if p.lower() in nl:
-                        # Nachdrainieren
                         _read(0.2)
-                        return _strip_ansi(
-                            buf[baseline:].decode("utf-8", errors="replace")
-                        )
-
+                        return _strip_ansi(buf[baseline:].decode("utf-8", errors="replace"))
             return _strip_ansi(buf[baseline:].decode("utf-8", errors="replace"))
 
-        PROMPT = ["[bluetooth]# "]
-
         try:
-            _wait(PROMPT, 7)                         # Auf Startprompt warten
+            # Auf Bereitschaft warten (Prompt oder Auto-Agent-Meldung)
+            _wait(["agent registered", "# "], 8)
 
-            _send("agent off")                       # Vorhandenen Agent abmelden
-            _wait(PROMPT, 3)
+            # ── Agent-Setup ────────────────────────────────────────────────────
+            # Vorhandenen Agent abmelden (auch wenn keiner da ist — kein Fehler)
+            _send("agent off")
+            _wait(["# "], 3)
 
-            _send("agent NoInputNoOutput")           # Headless-Agent anmelden
-            _wait(["agent registered", "already registered"] + PROMPT, 5)
+            # NoInputNoOutput: korrekt für BT-Lautsprecher ohne Display/Tastatur
+            _send("agent NoInputNoOutput")
+            _wait(["agent registered", "already registered", "# "], 5)
 
+            # Als Default-Agent setzen; Fehler "DoesNotExist" ignorieren
             _send("default-agent")
-            _wait(["default agent request successful"] + PROMPT, 5)
+            _wait(["default agent request successful", "DoesNotExist", "# "], 5)
 
             # ── Pairing ────────────────────────────────────────────────────────
-            # KEIN Prompt in done_patterns! bluetoothctl gibt '[bluetooth]# '
-            # sofort nach dem Starten des async Pairings aus – wir warten
-            # nur auf semantische Abschlussmeldungen.
+            # Kein Prompt in done_patterns: '[bluetooth]# ' kommt sofort nach
+            # dem Pairing-Start, das eigentliche Ergebnis folgt asynchron.
             _send(f"pair {mac}")
             _wait(
                 done_patterns=[
                     "Pairing successful",
                     "Failed to pair",
-                    "Paired: yes",       # [CHG]-Event
+                    "already paired",
+                    "Paired: yes",
                 ],
                 timeout=35,
                 respond={
-                    # Klassisches Bluetooth / Legacy-Pairing mit PIN
-                    "Enter PIN code":      "0000",
-                    # SSP Numeric Comparison – Bestätigung
-                    "Confirm passkey":     "yes",
+                    "Enter PIN code":       "0000",
+                    "Confirm passkey":      "yes",
                     "Request confirmation": "yes",
                 },
             )
 
+            # Trust immer setzen — auch wenn Pairing-Meldung zweideutig
             _send(f"trust {mac}")
-            _wait(["trust succeeded", "trusted: yes"] + PROMPT, 7)
+            _wait(["trust succeeded", "trusted: yes", "# "], 7)
 
+            # Verbinden
             _send(f"connect {mac}")
             _wait(
                 done_patterns=[
                     "Connection successful",
                     "Failed to connect",
                     "Connected: yes",
-                ] + PROMPT,
+                ],
                 timeout=20,
             )
 
@@ -731,49 +779,79 @@ class BluetoothService:
 
     def pair_device(self, mac: str) -> Dict[str, Any]:
         """
-        Vollständiger Pairing-Ablauf (pair → trust → connect) mit interaktivem
-        PTY, PIN-Handling und Fallback-Verifikation via 'bluetoothctl info'.
+        Vollständiger Pairing-Ablauf (pair → trust → connect).
+
+        Scan wird vorher gestoppt, damit kein paralleler bluetoothctl-Prozess
+        den Agent oder den Pairable-Status zurücksetzt.
         """
         mac = mac.upper()
         logger.info("Pairing starten: %s", mac)
+        self._emit("action_progress", {"action": "pair", "mac": mac, "message": "Adapter wird vorbereitet\u2026"})
 
+        # ── Scan stoppen ────────────────────────────────────────────────────────
+        # Kritisch: Der Scan-Prozess registriert einen eigenen Agent.  Wenn er
+        # endet, zieht er den Agent zurück und setzt Pairable: no – genau während
+        # des Pairings.  Durch explizites Stoppen vor dem Pairing vermeiden wir
+        # diesen Race.
+        with self._lock:
+            was_scanning = self._scan_active
+            self._scan_active = False
+        if was_scanning:
+            try:
+                subprocess.run(
+                    ["bluetoothctl", "scan", "off"],
+                    capture_output=True, timeout=4,
+                )
+            except Exception:
+                pass
+            time.sleep(0.5)   # BlueZ kurz Zeit geben, Scan-State aufzuräumen
+
+        # ── Adapter in Pairing-Modus ────────────────────────────────────────────
+        self._run(["rfkill", "unblock", "bluetooth"], timeout=3)
+        self._btctl(["power",        "on"], timeout=5)
+        self._btctl(["pairable",     "on"], timeout=5)
+        self._btctl(["discoverable", "on"], timeout=5)
+
+        self._emit("action_progress", {"action": "pair", "mac": mac, "message": "Pairing l\u00E4uft\u2026 (30\u201340s)"})
         output    = self._pair_interactive(mac)
         out_lower = output.lower()
         logger.info("Pairing-Ausgabe für %s:\n%s", mac, output)
+        self._emit("action_progress", {"action": "pair", "mac": mac, "message": "Ger\u00E4testatus wird gepr\u00FCft\u2026"})
 
-        already_paired = "already paired" in out_lower
-        pair_ok        = (
+        # ── Erfolgs-Erkennung ───────────────────────────────────────────────────
+        pair_ok = (
             "pairing successful" in out_lower
             or "paired: yes"     in out_lower
-            or already_paired
+            or "already paired"  in out_lower
         )
 
-        if not pair_ok:
-            # Fallback: Gerätestatus per 'info' prüfen — manche Geräte
-            # geben kein explizites "Pairing successful" aus
-            _, info_out = self._btctl(["info", mac], timeout=6)
-            info        = self._parse_info_block(_strip_ansi(info_out))
-            pair_ok     = info.get("paired", False)
+        # Immer per 'info' verifizieren — zuverlässigster Statuskanal
+        _, info_out = self._btctl(["info", mac], timeout=6)
+        info        = self._parse_info_block(_strip_ansi(info_out))
 
         if not pair_ok:
-            return {"ok": False, "error": f"Pairing fehlgeschlagen: {output}"}
+            pair_ok = info.get("paired", False)
+
+        if not pair_ok:
+            result = {"ok": False, "error": f"Pairing fehlgeschlagen: {output}"}
+            self._emit("action_done", {"action": "pair", "mac": mac, **result})
+            return result
 
         connected = (
             "connection successful" in out_lower
             or "connected: yes"     in out_lower
+            or info.get("connected", False)
         )
-        if not connected:
-            _, info_out2 = self._btctl(["info", mac], timeout=6)
-            info2        = self._parse_info_block(_strip_ansi(info_out2))
-            connected    = info2.get("connected", False)
-
-        return {
+        result = {
             "ok":        True,
-            "message":   "Erfolgreich gepairt und verbunden" if connected
-                         else "Gepairt — Gerät einschalten und 'Verbinden' klicken.",
+            "message":   "Verbunden & gespeichert" if connected
+                         else "Gespeichert \u2014 Ger\u00E4t einschalten und erneut verbinden.",
             "paired":    True,
+            "trusted":   True,
             "connected": connected,
         }
+        self._emit("action_done", {"action": "pair", "mac": mac, **result})
+        return result
 
     def trust_device(self, mac: str, trust: bool = True) -> Dict[str, Any]:
         """Markiert ein Gerät als vertrauenswürdig (oder hebt es auf)."""
@@ -783,17 +861,34 @@ class BluetoothService:
         return {"ok": ok, "trusted": trust, "message": out}
 
     def connect_device(self, mac: str) -> Dict[str, Any]:
-        """Verbindet ein bereits bekanntes Gerät."""
+        """
+        Verbindet ein bereits bekanntes Gerät.
+
+        Bei 'br-connection-unknown' (häufig bei BT-Lautsprechern wenn BlueZ
+        das Audioprofil noch nicht bereit hat): zweiter Versuch nach kurzer Pause.
+        """
         mac = mac.upper()
         ok, out = self._btctl(["connect", mac], timeout=15)
-        connected = ok or "successful" in out.lower() or "connected" in out.lower()
-        return {"ok": connected, "message": out, "connected": connected}
+        out_l = out.lower()
+
+        if not ok and "br-connection-unknown" in out_l.replace(" ", ""):
+            logger.info("connect %s: br-connection-unknown – zweiter Versuch", mac)
+            time.sleep(2)
+            ok, out = self._btctl(["connect", mac], timeout=15)
+            out_l = out.lower()
+
+        connected = ok or "successful" in out_l or "connected: yes" in out_l
+        result = {"ok": connected, "message": out, "connected": connected}
+        self._emit("action_done", {"action": "connect", "mac": mac, **result})
+        return result
 
     def disconnect_device(self, mac: str) -> Dict[str, Any]:
         """Trennt die Verbindung zu einem Gerät."""
         mac = mac.upper()
         ok, out = self._btctl(["disconnect", mac], timeout=10)
-        return {"ok": ok, "message": out}
+        result = {"ok": ok, "message": out}
+        self._emit("action_done", {"action": "disconnect", "mac": mac, **result})
+        return result
 
     def remove_device(self, mac: str) -> Dict[str, Any]:
         """Entfernt und unpairt ein Gerät vollständig."""
@@ -801,4 +896,6 @@ class BluetoothService:
         ok, out = self._btctl(["remove", mac], timeout=10)
         with self._lock:
             self._scan_devices.pop(mac, None)
-        return {"ok": ok, "message": out}
+        result = {"ok": ok, "message": out}
+        self._emit("action_done", {"action": "remove", "mac": mac, **result})
+        return result

@@ -459,7 +459,8 @@
     adapterPowered:   false,
     scanning:         false,
     scanDuration:     12,
-    scanPollTimer:    null,
+    scanPollTimer:    null,   // Fallback-Polling (nur wenn SSE nicht verfügbar)
+    eventSource:      null,   // SSE-Verbindung
   };
 
   // Gerätetyp → Emoji
@@ -580,12 +581,13 @@
     let actions = "";
     const safeMac = escapeHtml(dev.mac);
     if (context === "found") {
-      if (!dev.paired) {
-        actions += `<button data-btaction="pair" data-mac="${safeMac}" class="primary">Pairen</button>`;
-      } else if (dev.connected) {
+      if (dev.connected) {
         actions += `<button data-btaction="disconnect" data-mac="${safeMac}">Trennen</button>`;
-      } else {
+      } else if (dev.paired) {
         actions += `<button data-btaction="connect" data-mac="${safeMac}" class="primary">Verbinden</button>`;
+      } else {
+        // Noch nicht gepairt → "Verbinden" löst pair+trust+connect in einem Schritt aus
+        actions += `<button data-btaction="pair" data-mac="${safeMac}" class="primary bt-connect-new">Verbinden</button>`;
       }
     } else {
       if (dev.connected) {
@@ -602,7 +604,7 @@
     }
 
     return `
-      <div class="bt-device-item${dev.connected ? " connected" : ""}">
+      <div class="bt-device-item${dev.connected ? " connected" : ""}" data-bt-mac="${safeMac}">
         <div class="bt-device-icon">${emoji}</div>
         <div class="bt-device-info">
           <div class="bt-device-name">${escapeHtml(dev.name || dev.mac)}</div>
@@ -612,6 +614,26 @@
         ${sigTxt ? `<div class="bt-signal ${sigCls}">${sigTxt}</div>` : ""}
         <div class="bt-device-actions">${actions}</div>
       </div>`;
+  }
+
+  /** Fügt ein einzelnes Gerät in die Found-Liste ein oder ersetzt es (kein Full-Render). */
+  function btUpsertFoundDevice(dev) {
+    const list = qs("#bt-found-list");
+    if (!list) return;
+    const safeMac = escapeHtml(dev.mac);
+    const existing = list.querySelector(`[data-bt-mac="${safeMac}"]`);
+    const html = btDeviceItemHtml(dev, "found").trim();
+    const tmp = document.createElement("div");
+    tmp.innerHTML = html;
+    const newEl = tmp.firstElementChild;
+    if (existing) {
+      existing.replaceWith(newEl);
+    } else {
+      // Leer-Platzhalter entfernen falls vorhanden
+      const empty = list.querySelector(".bt-empty");
+      if (empty) empty.remove();
+      list.appendChild(newEl);
+    }
   }
 
   function btRenderFoundDevices(devices) {
@@ -668,9 +690,71 @@
     }
   }
 
+  // ── SSE-Stream ───────────────────────────────────────────────────────────────
+
+  function btOpenStream() {
+    if (btState.eventSource) return;
+    if (typeof EventSource === "undefined") { btStartScanPolling(); return; }
+
+    const es = new EventSource("/api/bluetooth/stream");
+    btState.eventSource = es;
+
+    es.addEventListener("scan_status", (ev) => {
+      try {
+        const d = JSON.parse(ev.data);
+        btUpdateScanProgress(d);
+        btState.scanning = !!d.scanning;
+        if (!d.scanning) {
+          btStopScanPolling();
+          btLoadKnown();
+        }
+      } catch (_) {}
+    });
+
+    es.addEventListener("scan_device", (ev) => {
+      try { btUpsertFoundDevice(JSON.parse(ev.data)); } catch (_) {}
+    });
+
+    es.addEventListener("action_progress", (ev) => {
+      try { const d = JSON.parse(ev.data); btSetStatus(d.message); } catch (_) {}
+    });
+
+    es.addEventListener("action_done", (ev) => {
+      try {
+        const d = JSON.parse(ev.data);
+        btSetStatus(d.message || (d.ok ? "OK" : d.error || "Fehler"), d.ok ? "ok" : "error");
+        btLoadKnown();
+        btLoadInline();
+        if (d.action === "pair" || d.action === "connect" || d.action === "disconnect") {
+          setTimeout(() => refreshSummaryAndTables(), 2000);
+        }
+        // Scan-Ergebnisse nach Aktion aktualisieren
+        getJson("/api/bluetooth/scan/results").then((sd) => {
+          if (sd.devices && sd.devices.length) btRenderFoundDevices(sd.devices);
+        }).catch(() => {});
+      } catch (_) {}
+    });
+
+    es.onerror = () => {
+      // Browser reconnected automatisch; nur auf Fallback-Polling wechseln
+      // wenn kein Scan läuft und wir nicht bereits pollen.
+      if (btState.scanning && !btState.scanPollTimer) btStartScanPolling();
+    };
+  }
+
+  function btCloseStream() {
+    if (btState.eventSource) {
+      btState.eventSource.close();
+      btState.eventSource = null;
+    }
+  }
+
+  // ── Fallback-Polling (aktiv wenn SSE nicht verfügbar) ───────────────────────
+
   function btStartScanPolling() {
+    if (btState.eventSource) return;  // SSE aktiv → kein Polling nötig
     if (btState.scanPollTimer) return;
-    btState.scanPollTimer = setInterval(btPollScan, 2000);
+    btState.scanPollTimer = setInterval(btPollScan, 1500);
   }
 
   function btStopScanPolling() {
@@ -678,7 +762,15 @@
   }
 
   async function btHandleAction(action, mac) {
-    btSetStatus(`${action}: ${mac}\u2026`);
+    const startLabels = {
+      pair: `Verbinde ${mac}\u2026 (Pairing + Vertrauen + Verbindung)`,
+      connect: `Verbinde ${mac}\u2026`,
+      disconnect: `Trenne ${mac}\u2026`,
+      trust: `Setze Vertrauen f\u00FCr ${mac}\u2026`,
+      untrust: `Entziehe Vertrauen f\u00FCr ${mac}\u2026`,
+      remove: `Entferne ${mac}\u2026`,
+    };
+    btSetStatus(startLabels[action] || `${action}: ${mac}\u2026`);
     const urlMac = encodeURIComponent(mac);
     const cfg = {
       pair:       { url: `/api/bluetooth/device/${urlMac}/pair`,       method: "POST" },
@@ -691,7 +783,7 @@
     if (!cfg) return;
 
     const btn = document.querySelector(`[data-btaction="${action}"][data-mac="${mac}"]`);
-    if (btn) { btn.disabled = true; btn.textContent = "\u2026"; }
+    if (btn) { btn.disabled = true; btn.textContent = action === "pair" ? "Verbinde\u2026" : "\u2026"; }
 
     try {
       const reqBody = cfg.method !== "DELETE" ? JSON.stringify(cfg.body ?? {}) : undefined;
@@ -701,7 +793,7 @@
         btSetStatus(`Fehler: ${data.error || data.message || "Unbekannt"}`, "error");
         if (btn) { btn.disabled = false; btn.textContent = action; }
       } else {
-        const labels = { pair: "Gepairt", connect: "Verbunden", disconnect: "Getrennt", trust: "Als vertrauenswürdig markiert", untrust: "Vertrauen entzogen", remove: "Entfernt" };
+        const labels = { pair: "Verbunden & gespeichert \u2714", connect: "Verbunden \u2714", disconnect: "Getrennt", trust: "Als vertrauenswürdig gespeichert \u2714", untrust: "Vertrauen entzogen", remove: "Entfernt" };
         btSetStatus(`${labels[action] || "OK"}: ${mac}`, "ok");
         await Promise.all([btLoadKnown(), btLoadInline()]);
         const scanData = await getJson("/api/bluetooth/scan/results");
@@ -721,6 +813,7 @@
     if (!modal) return;
     modal.classList.remove("hidden");
     document.body.style.overflow = "hidden";
+    btOpenStream();           // SSE-Verbindung aufbauen (ersetzt Polling)
     await btLoadStatus();
     await btLoadKnown();
   }
@@ -731,6 +824,7 @@
     modal.classList.add("hidden");
     document.body.style.overflow = "";
     btStopScanPolling();
+    btCloseStream();          // SSE-Verbindung schließen
   }
 
   async function btLoadInline() {
@@ -791,8 +885,8 @@
         if (data.ok) {
           btState.scanning = true;
           btSetStatus("Scan l\u00E4uft\u2026");
-          await btPollScan();
-          btStartScanPolling();
+          // SSE liefert Updates automatisch; Polling nur als Fallback
+          if (!btState.eventSource) { await btPollScan(); btStartScanPolling(); }
         } else {
           btSetStatus(`Scan-Fehler: ${data.error || data.message}`, "error");
         }

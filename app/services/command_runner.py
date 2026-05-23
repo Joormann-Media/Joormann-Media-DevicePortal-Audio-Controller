@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import List
+from typing import Dict, List
 
 
 @dataclass(slots=True)
@@ -13,6 +14,23 @@ class CommandResult:
     return_code: int
     output: str
     error: str
+
+
+def _build_audio_env() -> Dict[str, str]:
+    """Return an env dict that guarantees XDG_RUNTIME_DIR is set.
+
+    wpctl / pactl / pw-cli need XDG_RUNTIME_DIR to reach the per-user
+    PipeWire/PulseAudio socket.  When the app runs as a systemd service
+    (system scope, not --user) that variable is absent from the process
+    environment, so all audio commands fail silently.
+    """
+    env = dict(os.environ)
+    if not env.get("XDG_RUNTIME_DIR"):
+        uid = os.getuid()
+        candidate = f"/run/user/{uid}"
+        if os.path.isdir(candidate):
+            env["XDG_RUNTIME_DIR"] = candidate
+    return env
 
 
 class CommandRunner:
@@ -27,6 +45,7 @@ class CommandRunner:
                 text=True,
                 timeout=timeout,
                 check=False,
+                env=_build_audio_env(),
             )
             return CommandResult(
                 command=cmd,
